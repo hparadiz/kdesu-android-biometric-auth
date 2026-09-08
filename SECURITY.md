@@ -69,6 +69,8 @@ boundary preventing direct helper invocation.
 - **Trusted phone enrollment:** bootstrap currently needs a Pixel, a debug APK
   and authorized ADB. Network enrollment of unknown computers and a release-only
   enrollment flow are not implemented. Debug APKs are for that trusted bootstrap.
+  Release builds reject unknown computer keys and all enrollment requests in the
+  shared validator, in addition to the transport checks.
 - **Biometric modality:** Android selects strength, not exclusively fingerprint.
   Locally observed hardware enforcement is not independently verified attestation.
 - **Availability:** the LAN service adds network-facing code. Frames, workers and

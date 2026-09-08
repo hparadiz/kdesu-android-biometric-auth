@@ -24,7 +24,7 @@ part of the security boundary.
 
 | Component | Version / purpose |
 | --- | --- |
-| Android application | 0.8.1, API 30+, non-debuggable release mode |
+| Android application | 0.8.2, API 30+, non-debuggable release mode |
 | Host CLI and native/Python authority | Deployed 0.7.0 implementation |
 | KDE patch and Gentoo packages | kdesu-gui 6.7.2-r2 against kde-cli-tools 6.7.2 |
 | Direct Wi-Fi transport | Pinned TLS 1.3 to the phone on TCP 39841 |

@@ -52,6 +52,12 @@ authorized ADB plus biometric proof of possession. The phone pins the computer
 key, and the computer keeps an explicit approved-phone record. An unknown machine
 cannot enroll itself over the LAN listener.
 
+Release builds also enforce this in the shared request validator: unknown
+computer keys and all enrollment requests are rejected before the request is
+shown for approval, regardless of delivery route. Enrollment remains available
+only in a debuggable build through the documented trusted ADB bootstrap. A
+valid signature from an unknown key does not establish trust.
+
 Android uses `BiometricPrompt.CryptoObject(Signature)` with a per-operation strong
 biometric requirement. This is Android biometric strength selection, not a
 fingerprint-only modality guarantee. A qualifying face biometric may also be

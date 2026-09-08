@@ -46,6 +46,35 @@ The GitHub workflow builds with JDK 17 and its own temporary signer. Its run
 results are available under [Actions](https://github.com/hparadiz/kdesu-android-biometric-auth/actions).
 The workflow's APK is a disposable CI artifact, not a compatible update channel.
 
+## 0.8.2 requester trust hardening
+
+The shared Android validator now rejects unknown computer keys and all enrollment
+requests in release builds. Debug builds retain the trusted ADB enrollment path;
+both network transports still accept only already-enrolled computers. Existing
+machine request signatures and phone biometric approval signatures are unchanged.
+
+Both APK modes built locally with SDK 34 and JDK 25. APK signature and alignment
+verification passed. Badging reports version 0.8.2/code 11, with the debuggable flag
+present only in the debug APK. `git diff --check` passed.
+
+The local build initially used a disposable signer. A separate device release
+was signed with the existing enrolled app's signing key, and its signing
+certificate was checked against the APK pulled from the phone before an in-place
+update. The Pixel now reports 0.8.2/code 11; its foreground network service is
+running and `run-as` is rejected as `package not debuggable`.
+
+Live checks after the update:
+
+- A phone-approved request through installed kdesu executed `id -u`, returning
+  UID 0 and child exit status 0 in fresh root-owned runtime files. Existing
+  enrollment continued working without a key reset or re-enrollment.
+- A read-only LAN RPC signed by a fresh unknown computer key was rejected;
+  Android logged `Computer is not paired`.
+- A read-only LAN RPC claiming the enrolled computer ID but signed by a different
+  key was rejected; Android logged `Computer signature is invalid`.
+
+These are bounded acceptance/rejection checks, not a complete adversarial audit.
+
 ## What remains unverified
 
 - Physical reboot and first-unlock delivery without manually opening the app.

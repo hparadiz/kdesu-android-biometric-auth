@@ -62,8 +62,9 @@ computer enrollment request, tap Approve and complete the biometric operation.
 The host must print `ENROLLED`. Save the IDs from `python3 host.py status`.
 
 This bootstrap uses ADB `run-as` to access the debug app's private mailbox. New
-enrollment directly into a non-debuggable release is **not implemented**. Existing
-enrollment does not need to be repeated for compatible updates.
+enrollment directly into a non-debuggable release is **rejected by the request
+validator**, including requests to replace an existing pairing. Existing enrollment
+does not need to be repeated for compatible updates.
 
 On the phone, tap **Enable network authentication**, approve its one-time transport
 key binding, and complete [background setup](BACKGROUND.md). Wait for **Ready on

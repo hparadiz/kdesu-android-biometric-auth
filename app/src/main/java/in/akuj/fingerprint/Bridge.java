@@ -1,6 +1,7 @@
 package in.akuj.fingerprint;
 
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
 import android.util.Base64;
 import org.json.JSONObject;
 import java.io.ByteArrayInputStream;
@@ -18,8 +19,12 @@ import java.util.Arrays;
 final class Bridge {
     static final Object MAILBOX = new Object();
     private final File directory;
+    private final boolean developmentEnrollment;
 
-    Bridge(Context context) { directory = context.getFilesDir(); }
+    Bridge(Context context) {
+        directory = context.getFilesDir();
+        developmentEnrollment = (context.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+    }
 
     JSONObject read(String name) throws Exception {
         File file = new File(directory, name);
@@ -46,19 +51,24 @@ final class Bridge {
 
     Challenge validate(JSONObject envelope, SigningKey key, boolean allowExpired) throws Exception {
         X509Certificate machine = certificate(envelope.getString("machine_certificate_b64"));
+        String machineId = hash(machine.getPublicKey().getEncoded());
+        JSONObject pairing = pairings().optJSONObject(machineId);
+        // Release entry points never bootstrap trust from a request's own certificate.
+        if (pairing == null && !developmentEnrollment)
+            throw new IllegalArgumentException("Unknown computer. Requests require an enrolled computer key.");
         X509Certificate phone = certificate(envelope.getString("phone_certificate_b64"));
         validateCertificate(machine, machine, true);
         validateCertificate(phone, machine, false);
         verifyEnvelope(envelope, machine);
         Challenge request = new Challenge(envelope, machine, phone, allowExpired);
-        String machineId = hash(machine.getPublicKey().getEncoded());
+        if (request.kind.equals("enroll") && !developmentEnrollment)
+            throw new IllegalArgumentException("Computer enrollment requires the development ADB bootstrap.");
         if (!Arrays.equals(phone.getPublicKey().getEncoded(), key.publicKey.getEncoded())
                 || !key.id.equals(request.payload.getString("phone_key_id"))
                 || !machineId.equals(request.payload.getString("machine_id"))
                 || !hash(phone.getEncoded()).equals(request.payload.getString("certificate_sha256"))) {
             throw new IllegalArgumentException("Computer request does not match this phone’s key and certificate.");
         }
-        JSONObject pairing = pairings().optJSONObject(machineId);
         if (pairing == null && !request.kind.equals("enroll")) {
             throw new IllegalArgumentException("This phone must be enrolled by the computer first.");
         }
