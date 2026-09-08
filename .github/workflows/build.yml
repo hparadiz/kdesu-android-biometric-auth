@@ -1,0 +1,50 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK components
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'platforms;android-34' 'build-tools;34.0.0'
+      - name: Check shell, Python, native build and packaged source
+        run: |
+          bash -n build.sh install.sh
+          python3 -m py_compile host.py rootauth.py configure-authority.py kdeconnect_transport.py
+          mkdir -p build
+          cc -Wall -Wextra -Werror -fPIE -pie -Wl,-z,relro,-z,now -o build/authorize authorize.c
+          for source in authorize.c rootauth.py host.py configure-authority.py kdeconnect_transport.py; do
+            cmp "$source" "packaging/repo/sys-auth/navi-auth/files/$source"
+          done
+      - name: Build both modes with a disposable signer
+        run: |
+          ./build.sh debug
+          ./build.sh release
+          cd build
+          sha256sum phone-authenticator-release.apk > SHA256SUMS
+      - name: Upload disposable release-mode build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: disposable-release-apk
+          path: |
+            build/phone-authenticator-release.apk
+            build/SHA256SUMS
+          retention-days: 7
+          if-no-files-found: error

@@ -1,0 +1,22 @@
+<!-- Fingerprint identity with Navi's halo and plum/pink/violet/cyan palette. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="64dp" android:height="64dp" android:viewportWidth="64" android:viewportHeight="64">
+    <path android:fillColor="#160021" android:strokeColor="#593264" android:strokeWidth="1"
+        android:pathData="M16,1H48Q63,1 63,16V48Q63,63 48,63H16Q1,63 1,48V16Q1,1 16,1Z" />
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#D7B5F9" android:strokeWidth="1.8"
+        android:pathData="M23,8a9,2.4 0,1 0,18,0a9,2.4 0,1 0,-18,0" />
+    <group android:translateY="4" android:scaleY="0.94">
+        <path android:fillColor="@android:color/transparent" android:strokeWidth="3"
+            android:strokeLineCap="round" android:strokeLineJoin="round"
+            android:pathData="M12,28C12,4 52,4 52,28 M18,34V28C18,10 46,10 46,28V38 M25,45C27,39 25,33 25,28C25,19 39,19 39,28V37C39,45 43,50 48,53 M32,28V38C32,46 30,51 27,55 M18,41C18,47 16,51 14,53 M38,51L41,56">
+            <aapt:attr name="android:strokeColor">
+                <gradient android:startX="12" android:startY="12" android:endX="51" android:endY="55" android:type="linear">
+                    <item android:offset="0" android:color="#F072D7" />
+                    <item android:offset="0.48" android:color="#C4B5FD" />
+                    <item android:offset="1" android:color="#00D9FF" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+</vector>

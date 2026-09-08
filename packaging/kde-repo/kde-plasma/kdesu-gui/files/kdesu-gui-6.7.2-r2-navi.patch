@@ -1,0 +1,3549 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5b6d8dc7..70f95744 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -34,6 +34,7 @@ find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS
+     Widgets
+     Svg
+     DBus
++    Network
+ )
+ 
+ find_package(Qt6Test ${QT_MIN_VERSION} CONFIG QUIET)
+@@ -60,6 +61,7 @@ find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS
+     WindowSystem
+     Parts
+     CoreAddons
++    GuiAddons
+     OPTIONAL_COMPONENTS
+     Su
+     WidgetsAddons
+diff --git a/kdesu/CMakeLists.txt b/kdesu/CMakeLists.txt
+index ba5e4fc6..75234ed4 100644
+--- a/kdesu/CMakeLists.txt
++++ b/kdesu/CMakeLists.txt
+@@ -1,4 +1,8 @@
+-add_executable(kdesu_executable kdesu.cpp sudlg.cpp sudlg.h)
++add_library(kdesu_dialog STATIC sudlg.cpp sudlg.h commanddetails.cpp commanddetails.h programinfo.cpp programinfo.h phonenotification.cpp phonenotification.h phoneauthclient.cpp phoneauthclient.h)
++qt_add_resources(kdesu_dialog "requester_icons" PREFIX "/kdesu" FILES icons/codex.svg icons/LICENSE.codex)
++target_link_libraries(kdesu_dialog PUBLIC Qt::Widgets Qt::Network KF6::WidgetsAddons KF6::I18n KF6::ConfigCore KF6::CoreAddons KF6::GuiAddons KF6::Su)
++
++add_executable(kdesu_executable kdesu.cpp)
+ target_compile_definitions(kdesu_executable PRIVATE -DPROJECT_VERSION="${PROJECT_VERSION}")
+ 
+ # in KDELibsDependencies.cmake installed by kdelibs there is a dependency to "kdesu"
+@@ -7,11 +11,10 @@ target_compile_definitions(kdesu_executable PRIVATE -DPROJECT_VERSION="${PROJECT
+ # give it the name kdesu
+ set_target_properties(kdesu_executable PROPERTIES OUTPUT_NAME kdesu)
+ 
+-target_link_libraries(kdesu_executable Qt::GuiPrivate KF6::WidgetsAddons KF6::I18n KF6::ConfigCore KF6::WindowSystem KF6::Su)
++target_link_libraries(kdesu_executable kdesu_dialog Qt::GuiPrivate KF6::WindowSystem)
+ 
+ install(TARGETS kdesu_executable DESTINATION ${KDE_INSTALL_LIBEXECDIR_KF})
+ 
+-
+-
+-
+-
++if(BUILD_TESTING)
++    add_subdirectory(tests)
++endif()
+diff --git a/kdesu/kdesu.cpp b/kdesu/kdesu.cpp
+index a5e4a945..3012c542 100644
+--- a/kdesu/kdesu.cpp
++++ b/kdesu/kdesu.cpp
+@@ -50,8 +50,11 @@
+ #include <kdesu/defaults.h>
+ #include <kdesu/suprocess.h>
+ 
++#include "phoneauthclient.h"
+ #include "sudlg.h"
+ 
++using namespace KDESu;
++
+ #define ERR strerror(errno)
+ 
+ static QLoggingCategory category("org.kde.kdesu");
+@@ -379,9 +382,28 @@ static int startApp(QCommandLineParser &p)
+         data.setSilent(KStartupInfoData::Yes);
+         KStartupInfo::sendChange(id, data);
+ #endif
+-        KDEsuDialog dlg(user, auth_user, keep && !terminal, icon, withIgnoreButton);
+-        if (prompt) {
+-            dlg.addCommentLine(i18n("Command:"), QFile::decodeName(command));
++        PhoneAuthClient phoneAuthentication;
++        KDEsuDialog dlg({.user = user,
++                         .authUser = auth_user,
++                         .command = QFile::decodeName(command),
++                         .icon = icon,
++                         .showCommand = prompt,
++                         .enableKeep = keep && !terminal,
++                         .withIgnoreButton = withIgnoreButton});
++        if (prompt && user == "root" && priority == 50 && scheduler == SuProcess::SchedNormal && !terminal && QString::fromUtf8(command).toUtf8() == command) {
++            QJsonObject environment;
++            bool validEnvironment = true;
++            for (const char *name : {"DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XAUTHORITY"}) {
++                const QByteArray value = qgetenv(name);
++                if (!value.isEmpty()) {
++                    const QString text = QString::fromUtf8(value);
++                    validEnvironment = validEnvironment && text.toUtf8() == value;
++                    environment.insert(QString::fromLatin1(name), text);
++                }
++            }
++            if (validEnvironment) {
++                dlg.setPhoneAuthentication(&phoneAuthentication, environment);
++            }
+         }
+         if (defKeep) {
+             dlg.setKeepPassword(true);
+@@ -406,6 +428,14 @@ static int startApp(QCommandLineParser &p)
+         }
+ #endif
+         int ret = dlg.exec();
++        if (ret == KDEsuDialog::PhoneExecuted) {
++#if WITH_X11
++            KStartupInfo::sendFinish(id);
++#endif
++            // The verified root broker already launched this command. Never
++            // cache a password or run it again through system(), kdesud or su.
++            return 0;
++        }
+         if (ret == KDEsuDialog::Rejected) {
+ #if WITH_X11
+             KStartupInfo::sendFinish(id);
+diff --git a/kdesu/sudlg.cpp b/kdesu/sudlg.cpp
+index 5f769961..647af9c1 100644
+--- a/kdesu/sudlg.cpp
++++ b/kdesu/sudlg.cpp
+@@ -1,118 +1,687 @@
+-/* vi: ts=8 sts=4 sw=4
+- *
+- * This file is part of the KDE project, module kdesu.
++/*
+  * SPDX-FileCopyrightText: 2000 Geert Jansen <jansen@kde.org>
+  * SPDX-License-Identifier: Artistic-2.0
+  */
+ 
+ #include "sudlg.h"
++#include "commanddetails.h"
++#include "phoneauthclient.h"
++#include "phonenotification.h"
++#include "programinfo.h"
+ 
++#include <KAuthorized>
+ #include <KLocalizedString>
++#include <KMessageWidget>
++#include <KModifierKeyInfo>
++#include <KPasswordLineEdit>
++#include <KUser>
++
++#include <QAccessible>
++#include <QApplication>
++#include <QCheckBox>
++#include <QDialogButtonBox>
++#include <QFileInfo>
++#include <QFontDatabase>
++#include <QLabel>
++#include <QPainter>
++#include <QPainterPath>
++#include <QPlainTextEdit>
+ #include <QPushButton>
+-#include <qstyle.h>
++#include <QScreen>
++#include <QScrollArea>
++#include <QScrollBar>
++#include <QStyle>
++#include <QTextBrowser>
++#include <QTextDocument>
++#include <QTimer>
++#include <QToolButton>
++#include <QVBoxLayout>
++
++#include <cmath>
++#include <unistd.h>
++
++namespace
++{
++QLabel *textLabel(const QString &text, QWidget *parent)
++{
++    auto *label = new QLabel(text, parent);
++    label->setTextFormat(Qt::PlainText);
++    label->setWordWrap(true);
++    label->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
++    label->setMinimumWidth(0);
++    label->setFocusPolicy(Qt::ClickFocus);
++    label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
++    return label;
++}
++
++void heading(QLabel *label, qreal scale)
++{
++    QFont font = label->font();
++    font.setPointSizeF(font.pointSizeF() * scale);
++    font.setBold(true);
++    label->setFont(font);
++}
+ 
+-KDEsuDialog::KDEsuDialog(QByteArray user, QByteArray authUser, bool enableKeep, const QString &icon, bool withIgnoreButton)
+-    : KPasswordDialog(nullptr, enableKeep ? ShowKeepPassword : NoFlags)
++QPixmap avatar(const KUser &user, int size, qreal dpr, const QPalette &palette)
+ {
+-    if (!icon.isEmpty()) {
+-        setIcon(QIcon::fromTheme(icon));
++    QPixmap result(QSize(size, size) * dpr);
++    result.setDevicePixelRatio(dpr);
++    result.fill(Qt::transparent);
++    QPainter painter(&result);
++    painter.setRenderHint(QPainter::Antialiasing);
++    QPainterPath circle;
++    circle.addEllipse(QRectF(0, 0, size, size));
++    painter.setClipPath(circle);
++    painter.fillRect(QRect(0, 0, size, size), palette.brush(QPalette::AlternateBase));
++    const QPixmap face(user.faceIconPath());
++    if (face.isNull()) {
++        QIcon::fromTheme(QStringLiteral("user-identity")).paint(&painter, QRect(8, 8, size - 16, size - 16));
++    } else {
++        const QPixmap scaled = face.scaled(QSize(size, size) * dpr, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
++        const QSizeF extent = scaled.size() / dpr;
++        painter.drawPixmap(QRectF((size - extent.width()) / 2, (size - extent.height()) / 2, extent.width(), extent.height()), scaled, scaled.rect());
+     }
++    return result;
++}
++}
+ 
+-    if (withIgnoreButton) {
+-        buttonBox()->addButton(QDialogButtonBox::Ignore);
++KDEsuDialog::KDEsuDialog(const KDEsuRequest &request)
++    : QDialog(nullptr)
++{
++    proc.setUser(request.authUser);
++    const KUser currentUser(KUser::UseRealUserID);
++    const QString target = QString::fromLocal8Bit(request.user);
++    const QString passwordUser = proc.useUsersOwnPassword() ? currentUser.loginName() : QString::fromLocal8Bit(request.authUser);
++    const CommandDetails details = request.showCommand ? describeCommand(request.command) : CommandDetails{};
++    ProgramInfo program = details.arguments.isEmpty() ? ProgramInfo{i18n("Shell command"), QIcon::fromTheme(QStringLiteral("utilities-terminal"))}
++                                                      : programInfo(details.arguments.first());
++    if (!request.showCommand) {
++        program = {i18n("Application"), QIcon::fromTheme(QStringLiteral("application-x-executable"))};
++    }
++    if (!request.icon.isEmpty()) {
++        program.icon = QIcon::fromTheme(request.icon, program.icon);
++    }
++    if (program.icon.isNull()) {
++        program.icon = style()->standardIcon(QStyle::SP_ComputerIcon);
++    }
++    const qint64 parentPid = getppid();
++    const QString requesterPath = QFileInfo(QStringLiteral("/proc/%1/exe").arg(parentPid)).symLinkTarget();
++    ProgramInfo requester = programInfo(requesterPath);
++    if (requesterPath.isEmpty()) {
++        requester.name = i18n("Process %1", parentPid);
++    }
++    if (requester.icon.isNull()) {
++        requester.icon = style()->standardIcon(QStyle::SP_ComputerIcon);
++    }
++    const QString requesterDescription = i18n("Requesting process: %1\nProcess ID: %2", requesterPath, parentPid);
++    QString iconName = requester.icon.name();
++    if (iconName.contains(QLatin1Char('/'))) {
++        iconName.clear(); // Only theme identifiers belong in icon_name, never paths.
++    }
++    if (iconName.isEmpty() && requester.name == QLatin1String("Codex")) {
++        iconName = QStringLiteral("codex");
++    }
++    m_notificationContext = {{QStringLiteral("application"), requester.name},
++                             {QStringLiteral("action_id"), QStringLiteral("org.kde.kdesu.run")},
++                             {QStringLiteral("command"), request.showCommand ? request.command : QString()},
++                             {QStringLiteral("command_hidden"), !request.showCommand},
++                             {QStringLiteral("requesting_user"), currentUser.loginName()},
++                             {QStringLiteral("requesting_uid"), qint64(getuid())},
++                             {QStringLiteral("target_user"), target},
++                             {QStringLiteral("source"), QStringLiteral("kdesu")},
++                             {QStringLiteral("requester_pid"), parentPid},
++                             {QStringLiteral("requester_executable"), requesterPath},
++                             {QStringLiteral("icon_name"), iconName}};
++    const QString iconPng = PhoneNotification::iconPngBase64(requester.icon);
++    if (!iconPng.isEmpty()) {
++        m_notificationContext.insert(QStringLiteral("icon_png_base64"), iconPng);
+     }
+ 
+-    proc.setUser(authUser);
++    setWindowTitle(i18n("Authorize — Run as %1", target));
++    setWindowIcon(QIcon::fromTheme(QStringLiteral("dialog-password")));
++    setAccessibleName(i18n("Command authorization"));
++    setAccessibleDescription(i18n("Review the requesting process and command, then authenticate to run it as %1.", target));
++    setSizeGripEnabled(true);
+ 
+-    setWindowTitle(i18n("Run as %1", QString::fromLatin1(user)));
++    auto *outer = new QVBoxLayout(this);
++    outer->setContentsMargins(0, 0, 0, 0);
++    outer->setSpacing(0);
++    auto *scroll = m_scroll = new QScrollArea(this);
++    scroll->setFrameShape(QFrame::NoFrame);
++    scroll->setWidgetResizable(true);
++    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++    auto *body = new QWidget(scroll);
++    auto *layout = new QVBoxLayout(body);
++    layout->setContentsMargins(28, 28, 28, 20);
++    layout->setSpacing(20);
++    scroll->setWidget(body);
++    outer->addWidget(scroll, 1);
+ 
+-    QString prompt;
+-    if (proc.useUsersOwnPassword()) {
+-        prompt = i18n("Please enter your password below.");
+-    } else {
+-        if (authUser == "root") {
+-            if (withIgnoreButton) {
+-                prompt = QStringLiteral("<qt>")
+-                    + i18n("The action you requested needs <b>root privileges</b>. "
+-                           "Please enter <b>root's</b> password below or click "
+-                           "Ignore to continue with your current privileges.")
+-                    + QStringLiteral("</qt>");
+-            } else {
+-                prompt = QStringLiteral("<qt>")
+-                    + i18n("The action you requested needs <b>root privileges</b>. "
+-                           "Please enter <b>root's</b> password below.")
+-                    + QStringLiteral("</qt>");
++    auto *header = new QHBoxLayout;
++    header->setSpacing(18);
++    auto *requesterIcon = new QLabel(body);
++    requesterIcon->setObjectName(QStringLiteral("requesterIcon"));
++    requesterIcon->setPixmap(requester.icon.pixmap(QSize(56, 56), devicePixelRatioF()));
++    requesterIcon->setFixedSize(56, 56);
++    header->addWidget(requesterIcon, 0, Qt::AlignTop);
++    auto *titles = new QVBoxLayout;
++    titles->setSpacing(6);
++    titles->addWidget(textLabel(target == QLatin1String("root") ? i18n("Administrator access") : i18n("Run as %1", target), body));
++    auto *title = textLabel(requester.name, body);
++    title->setObjectName(QStringLiteral("requester"));
++    title->setToolTip(requesterDescription);
++    title->setAccessibleDescription(requesterDescription);
++    heading(title, 1.8);
++    titles->addWidget(title);
++    header->addLayout(titles, 1);
++    layout->addLayout(header);
++
++    titles->addWidget(textLabel(i18n("Wants to run a command as %1", target), body));
++
++    m_context = new QVBoxLayout;
++    m_context->setSpacing(10);
++    layout->addLayout(m_context);
++    if (request.showCommand) {
++        auto *commandHeader = new QHBoxLayout;
++        commandHeader->setSpacing(8);
++        auto *commandHeading = textLabel(i18n("&Command to run"), body);
++        heading(commandHeading, 1.0);
++        commandHeader->addWidget(commandHeading, 1);
++        auto *programIcon = new QLabel(body);
++        programIcon->setObjectName(QStringLiteral("programIcon"));
++        programIcon->setPixmap(program.icon.pixmap(QSize(20, 20), devicePixelRatioF()));
++        programIcon->setFixedSize(20, 20);
++        commandHeader->addWidget(programIcon);
++        auto *programName = textLabel(program.name, body);
++        programName->setObjectName(QStringLiteral("programName"));
++        programName->setAccessibleDescription(i18n("Program the command will run"));
++        programName->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
++        programName->setAlignment(Qt::AlignLeading | Qt::AlignVCenter);
++        commandHeader->addWidget(programName);
++        auto *commandText = new QPlainTextEdit(body);
++        commandText->setObjectName(QStringLiteral("commandText"));
++        commandText->setReadOnly(true);
++        commandText->setPlainText(request.command);
++        commandText->setLayoutDirection(Qt::LeftToRight);
++        QFont commandFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
++        commandFont.setPointSizeF(font().pointSizeF() * 1.25);
++        commandText->setFont(commandFont);
++        commandText->setLineWrapMode(QPlainTextEdit::WidgetWidth);
++        commandText->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
++        const int lines = request.command.size() > 90 || request.command.contains(QLatin1Char('\n')) ? 4 : 1;
++        commandText->setFixedHeight(commandText->fontMetrics().lineSpacing() * lines + 36);
++        commandText->setAccessibleName(i18n("Complete command, read only"));
++        commandText->setAccessibleDescription(
++            i18n("The exact command to run as %1. You can select and copy it. This field cannot change the command.", target));
++        commandHeading->setBuddy(commandText);
++        m_context->addLayout(commandHeader);
++        m_context->addWidget(commandText);
++
++        auto *explainButton = new QToolButton(body);
++        explainButton->setObjectName(QStringLiteral("explainCommand"));
++        explainButton->setText(i18n("Show command &details"));
++        explainButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
++        explainButton->setArrowType(Qt::RightArrow);
++        explainButton->setCheckable(true);
++        explainButton->setAccessibleDescription(i18n("Expand or collapse the command's argument breakdown."));
++        auto *explanation = new QTextBrowser(body);
++        explanation->setObjectName(QStringLiteral("commandExplanation"));
++        explanation->setOpenLinks(false);
++        explanation->setOpenExternalLinks(false);
++        explanation->setAccessibleName(i18n("Command breakdown"));
++        explanation->setFrameShape(QFrame::NoFrame);
++        explanation->setMinimumHeight(fontMetrics().lineSpacing() * 6);
++        explanation->setMaximumHeight(fontMetrics().lineSpacing() * 12);
++        QString html = QStringLiteral("<p>%1</p><p>%2</p><table cellspacing=\"0\" cellpadding=\"6\" width=\"100%\">")
++                           .arg(requesterDescription.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>")), details.explanation.toHtmlEscaped());
++        for (int i = 0; i < details.arguments.size(); ++i) {
++            const QString argument = details.arguments.at(i);
++            html += QStringLiteral("<tr><td><code>%1</code></td><td>%2</td></tr>")
++                        .arg(argument.isEmpty() ? QStringLiteral("''") : argument.toHtmlEscaped(), describeArgument(argument, i).toHtmlEscaped());
++        }
++        html += QStringLiteral("</table>");
++        explanation->setHtml(html);
++        explanation->hide();
++        connect(explainButton, &QToolButton::toggled, this, [this, explainButton, explanation, collapsedHeight = 0](bool expanded) mutable {
++            if (expanded) {
++                collapsedHeight = height();
+             }
+-        } else {
+-            if (withIgnoreButton) {
+-                prompt = QStringLiteral("<qt>")
+-                    + i18n("The action you requested needs additional privileges. "
+-                           "Please enter the password for <b>%1</b> below or click "
+-                           "Ignore to continue with your current privileges.",
+-                           QString::fromLatin1(authUser))
+-                    + QStringLiteral("</qt>");
+-            } else {
+-                prompt = QStringLiteral("<qt>")
+-                    + i18n("The action you requested needs additional privileges. "
+-                           "Please enter the password for <b>%1</b> below.",
+-                           QString::fromLatin1(authUser))
+-                    + QStringLiteral("</qt>");
++            explainButton->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
++            explainButton->setText(expanded ? i18n("Hide command &details") : i18n("Show command &details"));
++            explainButton->setAccessibleDescription(expanded ? i18n("Command breakdown expanded. Activate to collapse.")
++                                                             : i18n("Command breakdown collapsed. Activate to expand."));
++            explanation->setVisible(expanded);
++            const int extraHeight = qBound(explanation->minimumHeight(), explanation->sizeHint().height(), explanation->maximumHeight()) + m_context->spacing();
++            resize(width(), expanded ? qMin(collapsedHeight + extraHeight, screen()->availableGeometry().height() - 40) : collapsedHeight);
++        });
++        m_context->addWidget(explainButton, 0, Qt::AlignLeft);
++        m_context->addWidget(explanation);
++    } else {
++        m_context->addWidget(textLabel(i18n("The requesting application has hidden the command."), body));
++    }
++
++    m_phoneStatus = textLabel(QString(), body);
++    m_phoneStatus->setObjectName(QStringLiteral("phoneStatus"));
++    m_phoneStatus->setAccessibleName(i18n("Phone authentication status"));
++    m_phoneStatus->hide();
++    layout->addWidget(m_phoneStatus);
++
++    auto *account = new QFrame(body);
++    account->setObjectName(QStringLiteral("accountCard"));
++    account->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
++    auto *accountLayout = new QVBoxLayout(account);
++    accountLayout->setAlignment(Qt::AlignTop);
++    accountLayout->setContentsMargins(20, 18, 20, 20);
++    accountLayout->setSpacing(14);
++    auto *identity = new QHBoxLayout;
++    identity->setSpacing(14);
++    auto *userIcon = new QLabel(account);
++    userIcon->setPixmap(avatar(currentUser, 48, devicePixelRatioF(), palette()));
++    userIcon->setFixedSize(48, 48);
++    identity->addWidget(userIcon);
++    auto *userDetails = new QVBoxLayout;
++    userDetails->setSpacing(3);
++    QString fullName = currentUser.property(KUser::FullName).toString();
++    if (fullName.isEmpty()) {
++        fullName = currentUser.loginName();
++    }
++    auto *userName = textLabel(fullName, account);
++    userName->setObjectName(QStringLiteral("userName"));
++    heading(userName, 1.15);
++    userDetails->addWidget(userName);
++    userDetails->addWidget(textLabel(i18n("Signed in as %1", currentUser.loginName()), account));
++    identity->addLayout(userDetails, 1);
++    accountLayout->addLayout(identity);
++
++    auto *passwordLabel = textLabel(i18n("&Password for %1", passwordUser), account);
++    passwordLabel->setObjectName(QStringLiteral("passwordLabel"));
++    m_password = new KPasswordLineEdit(account);
++    m_password->setObjectName(QStringLiteral("passwordInput"));
++    m_password->setClearButtonEnabled(true);
++    m_password->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
++    m_password->lineEdit()->setMinimumHeight(fontMetrics().height() + 20);
++    m_password->lineEdit()->setAccessibleName(i18n("Password for %1", passwordUser));
++    m_password->lineEdit()->setAccessibleDescription(i18n("Authentication password. The command will run as %1.", target));
++    m_password->lineEdit()->setPlaceholderText(i18n("Enter password"));
++    m_password->setRevealPasswordMode(KAuthorized::authorize(QStringLiteral("lineedit_reveal_password")) ? KPassword::RevealMode::OnlyNew
++                                                                                                         : KPassword::RevealMode::Never);
++    passwordLabel->setBuddy(m_password->lineEdit());
++    accountLayout->addWidget(passwordLabel);
++    accountLayout->addWidget(m_password);
++    auto *capsLock = textLabel(i18n("Caps Lock is on"), account);
++    capsLock->setObjectName(QStringLiteral("capsLockWarning"));
++    auto *modifiers = new KModifierKeyInfo(this);
++    capsLock->setVisible(modifiers->isKeyLocked(Qt::Key_CapsLock));
++    connect(modifiers, &KModifierKeyInfo::keyLocked, this, [capsLock](Qt::Key key, bool locked) {
++        if (key == Qt::Key_CapsLock) {
++            capsLock->setVisible(locked);
++            if (locked) {
++                QAccessibleEvent event(capsLock, QAccessible::Alert);
++                QAccessible::updateAccessibility(&event);
+             }
+         }
++    });
++    accountLayout->addWidget(capsLock);
++    if (passwordUser != currentUser.loginName()) {
++        accountLayout->addWidget(textLabel(i18n("Enter %1's password to continue.", passwordUser), account));
+     }
+-    setPrompt(prompt);
++    m_keep = new QCheckBox(i18n("&Remember password"), account);
++    m_keep->setObjectName(QStringLiteral("rememberPassword"));
++    m_keep->setVisible(request.enableKeep);
++    accountLayout->addWidget(m_keep);
++    layout->addWidget(account);
++    layout->addStretch();
+ 
+-    if (withIgnoreButton) {
+-        connect(buttonBox()->button(QDialogButtonBox::Ignore), &QAbstractButton::clicked, this, &KDEsuDialog::slotUser1);
++    auto *footer = new QWidget(this);
++    auto *footerLayout = new QVBoxLayout(footer);
++    footerLayout->setContentsMargins(28, 0, 28, 24);
++    footerLayout->setSpacing(14);
++    m_error = new KMessageWidget(footer);
++    m_error->setObjectName(QStringLiteral("authenticationError"));
++    m_error->setMessageType(KMessageWidget::Error);
++    m_error->setWordWrap(true);
++    m_error->setCloseButtonVisible(false);
++    m_error->hide();
++    footerLayout->addWidget(m_error);
++    m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, footer);
++    auto *authorize = m_buttons->button(QDialogButtonBox::Ok);
++    authorize->setObjectName(QStringLiteral("authorizeButton"));
++    authorize->setText(i18n("&Authenticate"));
++    authorize->setDefault(true);
++    authorize->setAccessibleDescription(i18n("Authenticate and run the displayed command as %1.", target));
++    for (auto *button : m_buttons->buttons()) {
++        button->setMinimumHeight(fontMetrics().height() + 20);
++    }
++    if (request.withIgnoreButton) {
++        auto *ignore = m_buttons->addButton(QDialogButtonBox::Ignore);
++        ignore->setText(i18n("Run as &me"));
++        ignore->setToolTip(i18n("Continue with your current privileges, without authenticating."));
++        ignore->setAccessibleDescription(ignore->toolTip());
++        ignore->setMinimumHeight(fontMetrics().height() + 20);
++        connect(ignore, &QPushButton::clicked, this, [this] {
++            runAsUser();
++        });
+     }
++    // Ignore also has AcceptRole in QDialogButtonBox; only the password button
++    // may start a password check. Run as me has its own cancellation gate.
++    connect(m_buttons->button(QDialogButtonBox::Ok), &QPushButton::clicked, this, &KDEsuDialog::accept);
++    connect(m_buttons, &QDialogButtonBox::rejected, this, &KDEsuDialog::reject);
++    connect(m_password->lineEdit(), &QLineEdit::returnPressed, this, &KDEsuDialog::accept);
++    footerLayout->addWidget(m_buttons);
++    outer->addWidget(footer);
++
++    updateStyle();
++    connect(qApp, &QApplication::focusChanged, this, [this] {
++        QTimer::singleShot(0, this, &KDEsuDialog::ensureFocusVisible);
++    });
++
++    const QSize available = screen()->availableGeometry().size() - QSize(40, 40);
++    setMinimumSize(qMin(360, available.width()), qMin(320, available.height()));
++    const int initialWidth = qMin(qMax(580, fontMetrics().averageCharWidth() * 72), available.width());
++    resize(initialWidth, qMin(body->heightForWidth(initialWidth) + footer->sizeHint().height(), available.height()));
++    m_password->setFocus(Qt::OtherFocusReason);
+ }
+ 
+ KDEsuDialog::~KDEsuDialog()
+ {
++    m_cancelled = true;
++    if (m_phoneAuth) {
++        m_phoneAuth->cancel();
++    }
++    withdrawNotification(QStringLiteral("closed"));
+ }
+ 
+-bool KDEsuDialog::checkPassword()
++void KDEsuDialog::setPhoneAuthentication(PhoneAuthClient *client, const QJsonObject &environment)
+ {
+-    int status = proc.checkInstall(password().toLocal8Bit().constData());
+-    switch (status) {
+-    case -1:
+-        showErrorMessage(i18n("Conversation with su failed."), UsernameError);
+-        return false;
++    Q_ASSERT(!m_notificationStarted && !m_phoneAuth);
++    m_phoneAuth = client;
++    connect(this, &KDEsuDialog::notificationRequested, client, [client, environment](const QJsonObject &context) {
++        client->start(context, environment);
++    });
++    connect(client, &PhoneAuthClient::waitingForPhone, this, [this] {
++        setPhoneStatus(i18n("Approve this command on your phone, or enter your password here."));
++    });
++    connect(client, &PhoneAuthClient::ready, this, [this] {
++        if (m_phoneFallback != PhoneFallback::None || m_cancelled || m_authenticating) {
++            m_phoneAuth->cancel();
++            return;
++        }
++        // Choose exactly one execution owner before sending commit. This choice
++        // remains exclusive even if the broker's launch acknowledgement is lost.
++        m_phoneCommitted = true;
++        setPhoneBusy(true);
++        m_buttons->button(QDialogButtonBox::Cancel)->setText(i18n("&Close"));
++        setPhoneStatus(i18n("Phone approval verified. Starting the approved command…"));
++        m_phoneAuth->commit();
++    });
++    connect(client, &PhoneAuthClient::executed, this, [this] {
++        if (!m_cancelled && m_phoneCommitted) {
++            m_password->clear();
++            done(PhoneExecuted);
++        }
++    });
++    connect(client, &PhoneAuthClient::canceled, this, [this] {
++        if (!m_cancelled) {
++            setPhoneStatus(i18n("Phone request canceled. You can use your password."));
++            finishPhoneFallback();
++        }
++    });
++    connect(client, &PhoneAuthClient::unavailable, this, [this](const QString &message) {
++        if (!m_cancelled) {
++            setPhoneStatus(i18n("%1 You can use your password.", message));
++            finishPhoneFallback();
++        }
++    });
++    connect(client, &PhoneAuthClient::uncertain, this, [this] {
++        m_phoneCommitted = true;
++        setPhoneBusy(true);
++        m_buttons->button(QDialogButtonBox::Cancel)->setText(i18n("&Close"));
++        showErrorMessage(i18n("The phone-authorized command may already be running, but its launch could not be confirmed. "
++                              "Close this dialog and check the result before trying again."),
++                         true);
++    });
++}
+ 
+-    case 0:
+-        return true;
++void KDEsuDialog::setPhoneStatus(const QString &message)
++{
++    m_phoneStatus->setText(message);
++    m_phoneStatus->show();
++    QAccessibleEvent event(m_phoneStatus, QAccessible::Alert);
++    QAccessible::updateAccessibility(&event);
++}
+ 
+-    case SuProcess::SuNotFound:
+-        showErrorMessage(i18n("The program 'su' could not be found.<br />"
+-                              "Ensure your PATH is set correctly."),
+-                         FatalError);
+-        return false;
+-
+-    case SuProcess::SuNotAllowed:
+-        // This is actually never returned, as kdesu cannot tell the difference.
+-        showErrorMessage(QLatin1String("The impossible happened."), FatalError);
+-        return false;
+-
+-    case SuProcess::SuIncorrectPassword:
+-        showErrorMessage(i18n("Permission denied.<br />"
+-                              "Possibly incorrect password, please try again.<br />"
+-                              "On some systems, you need to be in a special "
+-                              "group (often: wheel) to use this program."),
+-                         PasswordError);
+-        return false;
++void KDEsuDialog::setPhoneBusy(bool busy)
++{
++    m_buttons->setEnabled(true);
++    for (auto *button : m_buttons->buttons()) {
++        button->setEnabled(!busy || m_buttons->standardButton(button) == QDialogButtonBox::Cancel);
++    }
++    m_password->setEnabled(!busy);
++}
+ 
+-    default:
+-        showErrorMessage(i18n("Internal error: illegal return from "
+-                              "SuProcess::checkInstall()"),
+-                         FatalError);
+-        done(Rejected);
+-        return false;
++void KDEsuDialog::finishPhoneFallback()
++{
++    if (m_phoneCommitted || m_cancelled) {
++        return;
++    }
++    const PhoneFallback fallback = m_phoneFallback;
++    m_phoneFallback = PhoneFallback::None;
++    setPhoneBusy(false);
++    if (fallback == PhoneFallback::Password) {
++        accept();
++    } else if (fallback == PhoneFallback::AsUser) {
++        runAsUser();
+     }
+ }
+ 
+-void KDEsuDialog::slotUser1()
++void KDEsuDialog::runAsUser()
+ {
++    if (m_phoneCommitted || m_cancelled || m_authenticating) {
++        return;
++    }
++    if (m_phoneAuth && m_phoneAuth->pending()) {
++        m_phoneFallback = PhoneFallback::AsUser;
++        setPhoneBusy(true);
++        setPhoneStatus(i18n("Canceling the phone request before continuing as you…"));
++        m_phoneAuth->cancel();
++        return;
++    }
++    m_password->clear();
+     done(AsUser);
+ }
+ 
++QString KDEsuDialog::password() const
++{
++    return m_password->password();
++}
++
++bool KDEsuDialog::keepPassword() const
++{
++    return !m_keep->isHidden() && m_keep->isChecked();
++}
++
++void KDEsuDialog::setKeepPassword(bool keep)
++{
++    m_keep->setChecked(keep);
++}
++
++void KDEsuDialog::addCommentLine(const QString &label, const QString &comment)
++{
++    m_context->addWidget(textLabel(i18nc("Label and its value", "%1 %2", label, comment), this));
++}
++
++void KDEsuDialog::resizeEvent(QResizeEvent *event)
++{
++    QDialog::resizeEvent(event);
++    if (!m_buttons) {
++        return;
++    }
++    m_buttons->setOrientation(Qt::Horizontal);
++    if (m_buttons->sizeHint().width() > width() - 56) {
++        m_buttons->setOrientation(Qt::Vertical);
++    }
++    QTimer::singleShot(0, this, &KDEsuDialog::ensureFocusVisible);
++}
++
++void KDEsuDialog::showEvent(QShowEvent *event)
++{
++    QDialog::showEvent(event);
++    QTimer::singleShot(0, this, &KDEsuDialog::ensureFocusVisible);
++    if (!m_notificationStarted && !m_notificationFinished && !m_cancelled && !m_fatalError) {
++        m_notificationStarted = true;
++        Q_EMIT notificationRequested(m_notificationContext);
++    }
++}
++
++void KDEsuDialog::withdrawNotification(const QString &reason)
++{
++    if (m_notificationFinished) {
++        return;
++    }
++    m_notificationFinished = true;
++    if (m_notificationStarted) {
++        Q_EMIT notificationWithdrawn(reason);
++    }
++}
++
++void KDEsuDialog::done(int result)
++{
++    withdrawNotification(result == Accepted ? QStringLiteral("authenticated") : result == AsUser ? QStringLiteral("run-as-user") : QStringLiteral("dismissed"));
++    QDialog::done(result);
++}
++
++void KDEsuDialog::ensureFocusVisible()
++{
++    QWidget *focus = focusWidget();
++    if (m_scroll && focus && m_scroll->widget()->isAncestorOf(focus)) {
++        m_scroll->ensureWidgetVisible(focus, 0, 16);
++        // QScrollArea may ensure only the input-method cursor is visible. Keep
++        // the whole focus control clear of the fixed footer as well.
++        const QRect rect(focus->mapTo(m_scroll->viewport(), QPoint()), focus->size());
++        const int viewportHeight = m_scroll->viewport()->height();
++        auto *bar = m_scroll->verticalScrollBar();
++        if (rect.top() < 0) {
++            bar->setValue(bar->value() + rect.top() - 8);
++        } else if (rect.bottom() >= viewportHeight) {
++            bar->setValue(bar->value() + rect.bottom() - viewportHeight + 9);
++        }
++    }
++}
++
++void KDEsuDialog::changeEvent(QEvent *event)
++{
++    QDialog::changeEvent(event);
++    if (event->type() == QEvent::ApplicationPaletteChange) {
++        updateStyle();
++    }
++}
++
++void KDEsuDialog::updateStyle()
++{
++    const QColor accent = palette().color(QPalette::Highlight);
++    const auto linear = [](qreal component) {
++        return component <= 0.04045 ? component / 12.92 : std::pow((component + 0.055) / 1.055, 2.4);
++    };
++    const qreal luminance = 0.2126 * linear(accent.redF()) + 0.7152 * linear(accent.greenF()) + 0.0722 * linear(accent.blueF());
++    // Whichever of black and white has higher contrast against the theme accent
++    // always exceeds 4.5:1. Do not assume HighlightedText meets that threshold.
++    const QString foreground = luminance > 0.179 ? QStringLiteral("#000000") : QStringLiteral("#ffffff");
++    setStyleSheet(
++        QStringLiteral(
++            "QFrame#accountCard { background: palette(base); border: 1px solid palette(mid); border-radius: 12px; }"
++            "QPlainTextEdit#commandText { background: palette(base); border: 1px solid palette(mid); border-radius: 10px; padding: 10px; }"
++            "QPlainTextEdit#commandText:focus { border: 1px solid palette(highlight); }"
++            "QPushButton#authorizeButton { background: palette(highlight); color: %1; border: 2px solid transparent; border-radius: 6px; padding: 4px 14px; }"
++            "QPushButton#authorizeButton:focus { border-color: %1; }"
++            "QPushButton#authorizeButton:hover { border-color: %1; }"
++            "QPushButton#authorizeButton:pressed { background: palette(button); color: palette(button-text); }"
++            "QPushButton#authorizeButton:disabled { background: palette(button); color: palette(button-text); }")
++            .arg(foreground));
++}
++
++void KDEsuDialog::accept()
++{
++    if (m_authenticating || m_fatalError || m_cancelled || m_phoneCommitted) {
++        return;
++    }
++    if (m_phoneAuth && m_phoneAuth->pending()) {
++        m_phoneFallback = PhoneFallback::Password;
++        setPhoneBusy(true);
++        setPhoneStatus(i18n("Canceling the phone request before checking your password…"));
++        m_phoneAuth->cancel();
++        return;
++    }
++    m_authenticating = true;
++    m_error->hide();
++    m_buttons->setEnabled(false);
++    m_password->setEnabled(false);
++    QTimer::singleShot(0, this, [this] {
++        if (m_cancelled) {
++            return;
++        }
++        const bool authenticated = checkPassword();
++        m_authenticating = false;
++        m_buttons->setEnabled(true);
++        m_password->setEnabled(!m_fatalError);
++        m_buttons->button(QDialogButtonBox::Ok)->setEnabled(!m_fatalError);
++        if (authenticated) {
++            QDialog::accept();
++        } else {
++            m_password->clear();
++            m_password->setFocus(Qt::OtherFocusReason);
++        }
++    });
++}
++
++void KDEsuDialog::reject()
++{
++    m_cancelled = true;
++    if (m_phoneAuth) {
++        m_phoneAuth->cancel();
++    }
++    m_password->clear();
++    QDialog::reject();
++}
++
++void KDEsuDialog::showErrorMessage(const QString &message, bool fatal)
++{
++    m_fatalError = fatal;
++    if (fatal) {
++        withdrawNotification(QStringLiteral("unavailable"));
++    }
++    m_error->setText(message);
++    m_error->setAccessibleName(message);
++    m_error->show();
++    m_password->lineEdit()->setAccessibleDescription(message);
++    QAccessibleEvent event(m_error, QAccessible::Alert);
++    QAccessible::updateAccessibility(&event);
++}
++
++bool KDEsuDialog::checkPassword()
++{
++    const int status = proc.checkInstall(password().toLocal8Bit().constData());
++    switch (status) {
++    case 0:
++        return true;
++    case -1:
++        showErrorMessage(i18n("Could not communicate with the authentication service. Please try again."));
++        break;
++    case KDESu::SuProcess::SuNotFound:
++        showErrorMessage(i18n("The program 'su' could not be found. Check that it is installed and available in PATH."), true);
++        break;
++    case KDESu::SuProcess::SuNotAllowed:
++        showErrorMessage(i18n("This account is not allowed to perform this action."), true);
++        break;
++    case KDESu::SuProcess::SuIncorrectPassword:
++        showErrorMessage(
++            i18n("Authentication was unsuccessful. Check the password and try again. "
++                 "Your account may also need permission to use su, such as membership in the wheel group."));
++        break;
++    default:
++        showErrorMessage(i18n("The authentication service returned an unexpected result."), true);
++        break;
++    }
++    return false;
++}
++
+ #include "moc_sudlg.cpp"
+diff --git a/kdesu/sudlg.h b/kdesu/sudlg.h
+index 3f76f099..6648e3df 100644
+--- a/kdesu/sudlg.h
++++ b/kdesu/sudlg.h
+@@ -1,38 +1,96 @@
+-/* vi: ts=8 sts=4 sw=4
+- *
+- * This file is part of the KDE project, module kdesu.
++/*
+  * SPDX-FileCopyrightText: 2000 Geert Jansen <jansen@kde.org>
+  * SPDX-License-Identifier: Artistic-2.0
+  */
+ 
+-#ifndef __SuDlg_h_Included__
+-#define __SuDlg_h_Included__
++#pragma once
+ 
+-#include <QByteArray>
+-
+-#include <KPasswordDialog>
+ #include <KDESu/SuProcess>
++#include <QDialog>
++#include <QJsonObject>
++#include <QPointer>
++
++class KMessageWidget;
++class KPasswordLineEdit;
++class QCheckBox;
++class QDialogButtonBox;
++class QScrollArea;
++class QLabel;
++class PhoneAuthClient;
++class QVBoxLayout;
+ 
+-using namespace KDESu;
++struct KDEsuRequest {
++    QByteArray user;
++    QByteArray authUser;
++    QString command;
++    QString icon = {};
++    bool showCommand = true;
++    bool enableKeep = false;
++    bool withIgnoreButton = false;
++};
+ 
+-class KDEsuDialog : public KPasswordDialog
++class KDEsuDialog : public QDialog
+ {
+     Q_OBJECT
+ 
+ public:
+-    KDEsuDialog(QByteArray user, QByteArray authUser, bool enableKeep, const QString &icon, bool withIgnoreButton);
++    explicit KDEsuDialog(const KDEsuRequest &request);
+     ~KDEsuDialog() override;
+ 
+-    enum ResultCodes { AsUser = 10 };
++    enum ResultCodes {
++        AsUser = 10,
++        PhoneExecuted = 11
++    };
+ 
+-private Q_SLOTS:
+-    void slotUser1();
++    QString password() const;
++    bool keepPassword() const;
++    void setKeepPassword(bool keep);
++    void addCommentLine(const QString &label, const QString &comment);
++    void setPhoneAuthentication(PhoneAuthClient *client, const QJsonObject &environment);
++    void accept() override;
++    void reject() override;
++    void done(int result) override;
++
++Q_SIGNALS:
++    void notificationRequested(const QJsonObject &context);
++    void notificationWithdrawn(const QString &reason);
+ 
+ protected:
+-    bool checkPassword() override;
++    virtual bool checkPassword();
++    void showErrorMessage(const QString &message, bool fatal = false);
++    void resizeEvent(QResizeEvent *event) override;
++    void changeEvent(QEvent *event) override;
++    void showEvent(QShowEvent *event) override;
+ 
+ private:
+-    SuProcess proc;
+-};
++    void ensureFocusVisible();
++    void updateStyle();
++    void withdrawNotification(const QString &reason);
++    void runAsUser();
++    void finishPhoneFallback();
++    void setPhoneBusy(bool busy);
++    void setPhoneStatus(const QString &message);
+ 
+-#endif // __SuDlg_h_Included__
++    KDESu::SuProcess proc;
++    KPasswordLineEdit *m_password;
++    KMessageWidget *m_error;
++    QCheckBox *m_keep;
++    QDialogButtonBox *m_buttons = nullptr;
++    QScrollArea *m_scroll = nullptr;
++    QVBoxLayout *m_context;
++    bool m_authenticating = false;
++    bool m_fatalError = false;
++    bool m_cancelled = false;
++    QJsonObject m_notificationContext;
++    bool m_notificationStarted = false;
++    bool m_notificationFinished = false;
++    QPointer<PhoneAuthClient> m_phoneAuth;
++    QLabel *m_phoneStatus;
++    enum class PhoneFallback {
++        None,
++        Password,
++        AsUser
++    };
++    PhoneFallback m_phoneFallback = PhoneFallback::None;
++    bool m_phoneCommitted = false;
++};
+diff --git a/kdesu/AUTHENTICATION.md b/kdesu/AUTHENTICATION.md
+new file mode 100644
+index 00000000..7d7338cd
+--- /dev/null
++++ b/kdesu/AUTHENTICATION.md
+@@ -0,0 +1,111 @@
++# Android-authorized command execution
++
++The production dialog launches the optional protected native helper
++`/usr/libexec/navi-auth/authorize` with no arguments and private stdin/stdout pipes.
++It needs no listening socket or boot daemon. The helper owns phone verification
++and command execution; KDE selects the phone or password path and never turns a
++phone response into a successful su password check.
++
++The Android session owns the native setuid launcher, `rootauth.py`, protected
++trust, revocation and deployment. This GUI package does not install that authority
++or modify sudo, pkexec or PAM. Safe previews cannot launch it; their historical
++notification-only interface is described in [NOTIFICATIONS.md](NOTIFICATIONS.md).
++
++## Eligibility and wire format
++
++The first implementation accepts visible commands that round-trip the original
++bytes through UTF-8, target root, use normal scheduling/priority 50, and do not
++request terminal output. Unsupported requests retain the existing password path.
++
++The client requires the fixed path to be a root-owned regular executable with the
++setuid bit, no group/world write permissions, and a safe root-owned directory chain
++through `/`. Symlinks are rejected. There is no runtime path/UID override. The native
++launcher independently requires an original nonroot real UID and effective root,
++derives the caller from `getuid()`, sanitizes environment/groups/FDs/cwd and invokes
++the fixed protected Python backend in isolated mode.
++
++One process carries one UUID and UTF-8 JSON lines using `navi-auth-exec/v1`.
++KDE starts it from `/` with only fixed PATH/LANG; the requested execution cwd and
++GUI environment travel inside the signed operation, not inherited authority.
++Starts are limited to64KiB and reply lines to16KiB. Stdout is protocol-only;
++stderr stays separate and is drained without being interpreted as authentication.
++
++```json
++{
++  "protocol": "navi-auth-exec/v1",
++  "event": "start",
++  "request_id": "085e5872-32ad-4e08-baf7-17f86e88576d",
++  "context": {
++    "application": "Codex",
++    "action_id": "org.kde.kdesu.run",
++    "command": "printf approved",
++    "command_hidden": false,
++    "requesting_user": "alice",
++    "requesting_uid": 1000,
++    "target_user": "root",
++    "source": "kdesu",
++    "requester_pid": 123,
++    "requester_executable": "/path/to/codex",
++    "icon_name": "codex",
++    "icon_png_base64": "<optional bounded PNG>"
++  },
++  "cwd": "/home/alice",
++  "environment": {}
++}
++```
++
++`cwd` and `environment` are always present. KDE forwards actual values, when set,
++for DISPLAY, WAYLAND_DISPLAY, DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR, and
++XAUTHORITY. The broker validates those values, holds the working directory, signs
++the operation, and uses a minimal execution environment. It derives the invoking
++user from the native launcher's kernel-derived real UID. Requester/application metadata remains display context,
++not proof of application identity. The same requester icon is used in the KDE
++header and signed phone context; target icon overrides do not affect it.
++
++## One execution owner
++
++Every reply must match the protocol and request ID. The broker sends `ready` only
++after verifying the phone signature, but it cannot execute until KDE sends
++`commit`. KDE atomically disables password/Run-as-me before sending that commit.
++
++Password or Run-as-me selected first sends `cancel`, waits for `canceled` or a
++precommit helper exit, and only then invokes the existing alternative. A late ready
++in that state is ignored. Closing the dialog before commit withdraws the request.
++
++After commit, the phone branch is exclusive. `executed` with a positive integer
++`pid` acknowledges that the broker launched the child. KDE returns success through
++a distinct `PhoneExecuted` result, before password caching or any call to
++`system()`, kdesud, or `SuProcess::exec()`. This is a launch acknowledgement, not the
++eventual command exit status. Acknowledgement loss cannot trigger another execution.
++
++An `error` before commit restores password fallback. An error, invalid response,
++timeout or disconnect after commit means the result is uncertain: the dialog
++offers Close, with both execution alternatives disabled. The client never replays
++the operation. Startup is bounded to1.5s; the precommit wait is125s while the helper
++enforces strict120s approval/commit expiry. Sending commit starts a separate20s
++completion deadline for signed receipt delivery and final executed, which does not
++extend approval freshness.
++
++Closing the write pipe withdraws an uncommitted request. Cancellation/terminal
++output must be flushed before helper exit. KDE allows35s precommit cleanup grace
++before best-effort termination signals and never equates signal attempts with ACK.
++A running QProcess is reaped asynchronously, never destroyed in a way that blocks
++the GUI; a normalized-root helper may reject GUI signals. No force-kill occurs
++after commit. The native helper has its own absolute180s alarm. Approved commands
++have detached sessions and stdio so helper/dialog exit cannot kill them or keep
++protocol pipes open. The client drains final buffered stdout before handling exit;
++exit0 without matching executed is never a launch acknowledgement.
++
++## Validation
++
++The existing dialog tests still run. `kdesu_phoneauth_test` uses an unprivileged
++stdio child fixture through a test-only subclass. The fixture is never installed;
++no real protected helper, phone, password check or privileged command is used.
++Coverage includes helper-path rejection, exact context/cwd/environment,
++ready/commit ordering, distinct phone completion, cancellation races, invalid
++replies, final-output draining and exclusive postcommit failure.
++
++```sh
++cmake --build ../build/kde-cli-tools --target kdesu_executable kdesu_dialog_test kdesu_phoneauth_test kdesu_dialog_preview -j8
++ctest --test-dir ../build/kde-cli-tools -R '^kdesu_(dialog|phoneauth)_test$' --output-on-failure
++```
+diff --git a/kdesu/DESIGN.md b/kdesu/DESIGN.md
+new file mode 100644
+index 00000000..4d975188
+--- /dev/null
++++ b/kdesu/DESIGN.md
+@@ -0,0 +1,106 @@
++# KDE su dialog
++
++Production phone approval uses the [protected execution interface](AUTHENTICATION.md)
++with a separate phone result and password fallback. The broker executes the approved
++command; the UI does not convert a phone response into password authentication.
++
++The dialog leads with the requesting process's name and icon together. The target
++program has a smaller name and icon beside the command heading, followed by the
++complete command and the signed-in user's account card. The password label names
++the account whose password the existing KDESu backend actually requires. That
++account can differ from both the signed-in user and the command's target account.
++
++The program name and icon come from the desktop entry when available. An explicit
++executable path that differs from the desktop executable retains its actual path
++and a generic icon. The existing `-i` option overrides only the target program
++icon; it cannot replace the requester's header icon. Codex has a capitalized name
++and a bundled, attributed vector fallback when no desktop entry or theme icon is
++installed. Installed Codex theme icons take precedence over the bundled artwork.
++The requester is the immediate parent process, obtained from `/proc`; its full
++path and PID are available in the details and to assistive technology. This is
++process metadata, not a verified application identity.
++
++## Command presentation
++
++- The large monospace field is read-only, selectable, copyable, and wraps long
++  commands. The displayed command is never rewritten for execution.
++- `-d` suppresses the command, its breakdown, and command-derived application
++  metadata. A short explanation makes the omission visible.
++- The expandable breakdown uses `KShell::splitArgs` with `AbortOnMeta`. Quoted
++  arguments remain grouped and are rendered as text, including HTML-like text.
++- Shell expressions, substitutions, assignments, keywords, and unmatched quotes
++  get an explanation of the parsing limit instead of a speculative breakdown.
++  Nothing is expanded or executed to generate the explanation. Argument syntax
++  alone cannot establish what an arbitrary program will do.
++
++## Accessibility and interaction
++
++- Native Qt/KDE controls expose their roles, names, values, and keyboard actions.
++  The password's accessible name identifies its authentication account, and its
++  accessible state remains a protected password field.
++- Initial focus goes to the password. Mnemonics reach the command, details,
++  password, remember-password checkbox, authentication, and unprivileged action.
++  Enter authenticates from the password field; Escape cancels. Static labels do
++  not add unnecessary stops to Tab navigation.
++- Focused controls are scrolled into view. Content can scroll on small displays
++  or with enlarged text; the action buttons stay outside that scrolling area and
++  stack vertically when necessary. Details expand the dialog within screen bounds.
++- Font sizes derive from the desktop font. Commands retain left-to-right
++  presentation inside a mirrored right-to-left interface.
++- Colors follow the desktop palette. The primary button uses whichever of black
++  or white gives sufficient text contrast against the accent. Keyboard focus has
++  a visible border, and information is not conveyed by color alone.
++- Native password reveal behavior respects `lineedit_reveal_password`. Caps Lock
++  feedback uses KGuiAddons on platforms that provide the modifier state.
++- Errors remain in the dialog and raise an accessibility alert. Failed attempts
++  clear the password and return focus. Fatal errors disable authentication while
++  retaining cancellation. A queued attempt cannot accept after cancellation.
++- There are no decorative animations, remote explanations, or new credential
++  storage. Password retention continues to use the existing kdesu behavior.
++
++Automated checks cover requester/target separation, Codex metadata and icon
++fallbacks, executable path mismatches, parsing boundaries, literal rendering, command privacy,
++account labels, accessibility properties, keyboard submission, retry, cancellation,
++fatal errors, the Ignore result, and focus visibility on a narrow window. Native
++Plasma renders cover light/dark palettes, doubled text size, long commands, narrow
++windows, and right-to-left layout. Actual screen-reader user testing and real PAM
++authentication are still separate validation steps; mocked tests do not prove them.
++
++## Development preview
++
++From the `kde-cli-tools` source directory:
++
++```sh
++cmake -S . -B ../build/kde-cli-tools -DBUILD_DOC=OFF -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug
++cmake --build ../build/kde-cli-tools --target kdesu_executable kdesu_dialog_test kdesu_dialog_preview -j8
++ctest --test-dir ../build/kde-cli-tools -R '^kdesu_dialog_test$' --output-on-failure
++../build/kde-cli-tools/bin/kdesu_dialog_preview
++```
++
++The preview is a separate, uninstalled executable. It never checks a password or
++runs the command. It supports `--command`, `--expanded`, `--hidden`, `--rtl`,
++`--font-scale 2`, `--width`, `--height`, `--palette BreezeLight`,
++`--palette BreezeDark`, and `--screenshot /path/to/image.png`. The explicit
++`--notify-phone` switch also exercises the [phone notification interface](NOTIFICATIONS.md)
++with `source: "kdesu-preview"`; it still cannot authenticate or execute commands.
++
++The dialog adds a direct KGuiAddons dependency for Caps Lock state. A Gentoo build
++must include `kde-frameworks/kguiaddons` in the `kdesu-gui` dependencies and apply
++the saved package preparation separately from this development checkout. The
++historical preview notification transport also links Qt Network for its local socket.
++Production phone authentication uses QProcess private pipes to the protected
++optional helper, with no listening socket or daemon.
++
++## Fingerprint authentication
++
++At inspection on 2026-09-06, this machine had no installed fprintd package and its
++`su`/`system-auth` PAM configuration had no fingerprint module. KDESu's current
++`SuProcess::converseSU()` implements a password prompt conversation, not a
++general PAM challenge interface.
++
++A working fingerprint option therefore needs supported/enrolled hardware, an
++administrator-configured authentication path, and a backend that handles its
++challenge, retry, cancellation, and fallback states. A fingerprint match reported
++to the dialog alone is not authority to execute a privileged command. The current
++implementation does not advertise a nonfunctional fingerprint button or change
++the system's PAM configuration.
+diff --git a/kdesu/NOTIFICATIONS.md b/kdesu/NOTIFICATIONS.md
+new file mode 100644
+index 00000000..1fa55ee1
+--- /dev/null
++++ b/kdesu/NOTIFICATIONS.md
+@@ -0,0 +1,145 @@
++# Phone notification interface, version 1
++
++This interface mirrors the lifetime of a visible kdesu prompt to the paired-phone
++host bridge. It carries display context only. It neither checks phone signatures
++nor accepts authentication results; kdesu still authenticates and executes through
++its existing KDESu/su path. Inbound socket data is discarded.
++
++## Transport
++
++The host listens on an AF_UNIX stream socket at
++`$XDG_RUNTIME_DIR/navi-auth/events.sock`. It owns the containing directory with
++mode 0700 and the socket with mode 0600. The client rejects symlinks at either of
++these two paths, checks ownership/private permissions, and checks the server's
++`SO_PEERCRED` UID against its real UID on Linux. The host must also check the
++client's peer credentials; JSON fields are not credentials. Other platforms
++currently do not send events.
++
++Each dialog opens one connection and emits UTF-8 JSON lines. The limit is 65536
++bytes per line including the newline. Embedded newlines in strings are JSON
++escaped. An oversized start is omitted rather than truncating the command. The
++client connects asynchronously, abandons an incomplete connection after 1500 ms,
++and does not reconnect, replay, or wait for a response. An absent bridge does not
++affect desktop password authentication.
++
++The host must treat EOF/disconnection as withdrawal of every pending request for
++that connection, including when no cancel line arrived. Destruction and process
++death close the connection; cancel delivery alone is not a sufficient lifetime
++guarantee. A disconnected or cancelled request must never be accepted, replayed,
++or revived by a late phone signature.
++
++## Start
++
++The first show of the dialog emits one start event:
++
++```json
++{
++  "protocol": "navi-auth-desktop/v1",
++  "event": "start",
++  "request_id": "085e5872-32ad-4e08-baf7-17f86e88576d",
++  "mode": "notification-only",
++  "context": {
++    "application": "Codex",
++    "action_id": "org.kde.kdesu.run",
++    "command": "systemsettings kcm_users",
++    "command_hidden": false,
++    "requesting_user": "alice",
++    "requesting_uid": 1000,
++    "target_user": "root",
++    "source": "kdesu",
++    "requester_pid": 123,
++    "requester_executable": "/path/to/codex",
++    "icon_name": "codex",
++    "icon_png_base64": "<standard base64 PNG>"
++  }
++}
++```
++
++`request_id` is a fresh UUID scoped to this connection and dialog. The host issues
++its own cryptographic request ID, nonce, expiry, and machine identity, associating
++them with this desktop ID. The desktop does not supply a machine name, key, or
++certificate. The phone should prominently display the machine name bound to the
++paired machine identity; the host must authenticate that identity and sign the
++complete phone payload, including the icon and notification-only status. This
++notification-only phase must be identified as such in the phone UI.
++
++The application name and image are resolved from the same immediate parent
++executable as the desktop header. A target's `-i` override cannot affect these
++fields. This process metadata is descriptive, not a verified application identity.
++The context contains no password or password-retention state.
++
++`icon_name` is a desktop theme identifier or an empty string. Optional
++`icon_png_base64` decodes to a PNG no larger than 16384 bytes and 256 by 256 pixels.
++The current encoder starts at 128 physical pixels and reduces resolution to meet
++the byte budget; an unencodable image is omitted. The phone must validate these
++bounds and decode only after verifying the signed payload. No remote icon URLs or
++local icon paths are transmitted.
++
++With `-d`, `command` is empty and `command_hidden` is true. The host must preserve
++that omission rather than substituting command text. A normal request carries the
++exact displayed command, without executing or rewriting it.
++
++The initial Android bridge applies stricter display limits than this transport:
++application names over 80 characters, commands over 512 characters, and commands
++containing newlines or tabs receive no phone notification. The bridge logs the
++rejection; neither the command nor desktop authentication is altered. Increasing
++these limits requires coordinated changes to the broker, host, and Android app.
++The bridge currently handles one active request and rejects additional dialogs.
++
++## Withdrawal
++
++```json
++{
++  "protocol": "navi-auth-desktop/v1",
++  "event": "cancel",
++  "request_id": "085e5872-32ad-4e08-baf7-17f86e88576d",
++  "reason": "dismissed"
++}
++```
++
++| Reason | Trigger |
++| --- | --- |
++| `dismissed` | Cancel, Escape, or closing the dialog |
++| `authenticated` | Successful password check closes the dialog |
++| `run-as-user` | Run as me, without elevated privileges |
++| `unavailable` | Fatal authentication error or transport failure |
++| `closed` | Destruction without an earlier withdrawal |
++
++Withdrawal is idempotent and closes the connection. A failed, retryable password
++attempt keeps the notification alive. Hiding and showing the same dialog does not
++issue another start. The host imposes its normal expiry (currently 120 seconds);
++this client does not renew expired phone requests.
++
++The host invalidates the pending request before withdrawing the phone notification.
++A late response must not win a race with cancellation. Neither `authenticated`
++nor any other cancellation reason means that the command was actually executed.
++
++## Development and authority boundary
++
++The current production kdesu instead uses the separate
++[protected execution interface](AUTHENTICATION.md). This notification-only
++transport remains available to explicit previews. Tests and normal previews do
++not connect it. For an
++explicit integration exercise against a running host bridge:
++
++```sh
++../build/kde-cli-tools/bin/kdesu_dialog_preview --notify-phone
++```
++
++The preview uses `source: "kdesu-preview"`. It never validates a password or runs
++the displayed command. Closing it exercises withdrawal on the same connection.
++
++Real phone-backed elevation needs a privileged PAM integration into the su
++authentication path, or a defined Polkit broker/action that verifies the challenge
++and executes the exact authorized operation. The existing `checkInstall(password)`
++and later `SuProcess::exec(password)` are separate password-based interactions.
++Changing the dialog result from a phone approval does not convey authority to su.
++No PAM, Polkit, system package, or phone configuration is changed by this hook.
++Only prompts from the rebuilt kdesu use this hook; other desktop authentication
++agents, including Polkit agents, need their own integration.
++
++## Historical status
++
++The notification-only preview was exercised during development. It cannot
++authorize execution. Use AUTHENTICATION.md and this repository's public docs
++for the deployed private-pipe authority and current verification scope.
+diff --git a/kdesu/commanddetails.cpp b/kdesu/commanddetails.cpp
+new file mode 100644
+index 00000000..cd142d92
+--- /dev/null
++++ b/kdesu/commanddetails.cpp
+@@ -0,0 +1,62 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++#include "commanddetails.h"
++
++#include <KLocalizedString>
++#include <KShell>
++#include <QSet>
++
++CommandDetails describeCommand(const QString &command)
++{
++    KShell::Errors error;
++    const QStringList arguments = KShell::splitArgs(command, KShell::AbortOnMeta, &error);
++    if (error == KShell::BadQuoting) {
++        return {{}, i18n("The quotation marks could not be matched. Review the complete command above.")};
++    }
++
++    // KShell does not recognize shell builtins or keywords. Tilde expansion also
++    // depends on the target account. Do not present those expressions as argv.
++    static const QSet<QString> shellWords = {
++        QStringLiteral("!"),       QStringLiteral("."),        QStringLiteral(":"),      QStringLiteral("if"),       QStringLiteral("then"),
++        QStringLiteral("else"),    QStringLiteral("elif"),     QStringLiteral("fi"),     QStringLiteral("for"),      QStringLiteral("while"),
++        QStringLiteral("until"),   QStringLiteral("do"),       QStringLiteral("done"),   QStringLiteral("case"),     QStringLiteral("esac"),
++        QStringLiteral("select"),  QStringLiteral("function"), QStringLiteral("time"),   QStringLiteral("coproc"),   QStringLiteral("eval"),
++        QStringLiteral("exec"),    QStringLiteral("export"),   QStringLiteral("source"), QStringLiteral("cd"),       QStringLiteral("alias"),
++        QStringLiteral("unalias"), QStringLiteral("set"),      QStringLiteral("unset"),  QStringLiteral("readonly"), QStringLiteral("read"),
++        QStringLiteral("trap"),    QStringLiteral("umask"),    QStringLiteral("ulimit"), QStringLiteral("return"),   QStringLiteral("exit"),
++        QStringLiteral("break"),   QStringLiteral("continue"), QStringLiteral("shift"),  QStringLiteral("getopts"),  QStringLiteral("command"),
++        QStringLiteral("builtin"), QStringLiteral("enable"),   QStringLiteral("type"),   QStringLiteral("hash"),     QStringLiteral("wait"),
++        QStringLiteral("jobs"),    QStringLiteral("fg"),       QStringLiteral("bg"),
++    };
++    if (error == KShell::FoundMeta || command.contains(QLatin1Char('~')) || command.contains(QLatin1Char('\n')) || command.contains(QLatin1Char('\r'))
++        || command.contains(QLatin1Char('\t')) || (!arguments.isEmpty() && shellWords.contains(arguments.first()))) {
++        return {{},
++                i18n("This is a shell expression. Its effects can depend on expansions, redirects, or other commands. "
++                     "Review the complete text above; it has not been evaluated.")};
++    }
++    if (arguments.isEmpty() || arguments.first().isEmpty()) {
++        return {{}, i18n("No program was specified.")};
++    }
++    return {arguments,
++            i18n("The first word selects the program; the remaining words are passed as arguments. "
++                 "Quotes group words into a single argument. The program defines what each argument does.")};
++}
++
++QString describeArgument(const QString &argument, int index)
++{
++    if (index == 0) {
++        return i18n("Program or shell builtin to run");
++    }
++    if (argument.isEmpty()) {
++        return i18n("Argument %1: an empty string", index);
++    }
++    // Option syntax is a convention: even '--' is not universal, and an
++    // option-looking word might be the value of an earlier argument.
++    if (argument.startsWith(QLatin1Char('-')) && argument.size() > 1) {
++        return i18n("Argument %1: option-style text; interpreted by the program", index);
++    }
++    return i18n("Argument %1: passed to the program as one value", index);
++}
+diff --git a/kdesu/commanddetails.h b/kdesu/commanddetails.h
+new file mode 100644
+index 00000000..22432eea
+--- /dev/null
++++ b/kdesu/commanddetails.h
+@@ -0,0 +1,17 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++#pragma once
++
++#include <QStringList>
++
++struct CommandDetails {
++    QStringList arguments;
++    QString explanation;
++};
++
++// Display-only parsing. Never expands, resolves, or executes the command.
++CommandDetails describeCommand(const QString &command);
++QString describeArgument(const QString &argument, int index);
+diff --git a/kdesu/icons/LICENSE.codex b/kdesu/icons/LICENSE.codex
+new file mode 100644
+index 00000000..1dd53d2a
+--- /dev/null
++++ b/kdesu/icons/LICENSE.codex
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2023 LobeHub
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/kdesu/icons/README.md b/kdesu/icons/README.md
+new file mode 100644
+index 00000000..803f3474
+--- /dev/null
++++ b/kdesu/icons/README.md
+@@ -0,0 +1 @@
++The Codex glyph is from [Lobe Icons](https://github.com/lobehub/lobe-icons/blob/master/packages/static-svg/icons/codex.svg), retrieved 2026-09-06, under the adjacent MIT license. A neutral rounded background was added for legibility on light and dark desktop palettes. Codex is an OpenAI trademark. Installed `codex` or `com.openai.codex` theme icons take precedence over this fallback.
+diff --git a/kdesu/icons/codex.svg b/kdesu/icons/codex.svg
+new file mode 100644
+index 00000000..100149a9
+--- /dev/null
++++ b/kdesu/icons/codex.svg
+@@ -0,0 +1,7 @@
++<!-- SPDX-FileCopyrightText: 2023 LobeHub
++     SPDX-License-Identifier: MIT
++     Codex glyph from Lobe Icons; neutral background added for KDE su. -->
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <rect x="1" y="1" width="62" height="62" rx="15" fill="#f5f5f5" stroke="#c8c8c8"/>
++  <path fill="#171717" fill-rule="evenodd" transform="translate(12 12) scale(1.6666667)" d="M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z"/>
++</svg>
+diff --git a/kdesu/phoneauthclient.cpp b/kdesu/phoneauthclient.cpp
+new file mode 100644
+index 00000000..3fa39f80
+--- /dev/null
++++ b/kdesu/phoneauthclient.cpp
+@@ -0,0 +1,383 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++#include "phoneauthclient.h"
++
++#include <KLocalizedString>
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QJsonDocument>
++#include <QProcess>
++#include <QProcessEnvironment>
++#include <QTimer>
++#include <QUuid>
++
++#include <sys/stat.h>
++#include <unistd.h>
++
++namespace
++{
++const QString protocol = QStringLiteral("navi-auth-exec/v1");
++constexpr qsizetype maximumStartBytes = 64 * 1024;
++constexpr qsizetype maximumReplyBytes = 16 * 1024;
++constexpr int withdrawalGraceMs = 35000; // Up to 15s delivery + 15s signed cancellation, then margin.
++
++QByteArray line(const QJsonObject &object)
++{
++    return QJsonDocument(object).toJson(QJsonDocument::Compact) + '\n';
++}
++
++void releaseHelper(QProcess *process, bool committed)
++{
++    if (!process) {
++        return;
++    }
++    // A running QProcess destructor kills and waits. In particular, the GUI may
++    // not be allowed to signal a helper which normalized its real UID to root.
++    // Leave cleanup asynchronous and unparented: application exit closes the
++    // pipes; the protected helper owns EOF cleanup and its absolute 180s limit.
++    process->setParent(nullptr);
++    process->disconnect();
++    if (process->state() == QProcess::NotRunning) {
++        process->deleteLater();
++        return;
++    }
++    QObject::connect(process, &QProcess::finished, process, &QObject::deleteLater);
++    QObject::connect(process, &QProcess::errorOccurred, process, [process] {
++        if (process->state() == QProcess::NotRunning) {
++            process->deleteLater(); // FailedToStart does not emit finished.
++        }
++    });
++    QObject::connect(process, &QProcess::readyReadStandardOutput, process, [process] {
++        process->readAllStandardOutput();
++    });
++    QObject::connect(process, &QProcess::readyReadStandardError, process, [process] {
++        process->readAllStandardError();
++    });
++    QObject::connect(process, &QProcess::started, process, [process] {
++        process->closeWriteChannel();
++    });
++    process->closeWriteChannel();
++    if (!committed) {
++        QTimer::singleShot(withdrawalGraceMs, process, [process] {
++            if (process->state() != QProcess::NotRunning) {
++                process->terminate(); // Best effort only; never treat a signal attempt as an acknowledgement.
++                QTimer::singleShot(1000, process, [process] {
++                    if (process->state() != QProcess::NotRunning) {
++                        process->kill();
++                    }
++                });
++            }
++        });
++    }
++}
++}
++
++PhoneAuthClient::PhoneAuthClient(QObject *parent)
++    : QObject(parent)
++    , m_startTimeout(new QTimer(this))
++    , m_lifetime(new QTimer(this))
++    , m_shutdownGrace(new QTimer(this))
++    , m_requestId(QUuid::createUuid().toString(QUuid::WithoutBraces))
++{
++    m_startTimeout->setSingleShot(true);
++    m_startTimeout->setInterval(1500);
++    m_lifetime->setSingleShot(true);
++    m_lifetime->setObjectName(QStringLiteral("phoneAuthDeadline"));
++    m_lifetime->setInterval(125000); // Approval/commit freshness is enforced by the helper at 120s.
++    m_shutdownGrace->setSingleShot(true);
++    connect(m_startTimeout, &QTimer::timeout, this, [this] {
++        fail(i18n("The phone authentication helper did not start."));
++    });
++    connect(m_lifetime, &QTimer::timeout, this, [this] {
++        fail(i18n("The phone authentication request timed out."));
++    });
++    connect(m_shutdownGrace, &QTimer::timeout, this, [this] {
++        if (!m_process || m_committed || m_process->state() == QProcess::NotRunning) {
++            return;
++        }
++        if (!m_terminationAttempted) {
++            m_terminationAttempted = true;
++            m_process->terminate();
++            m_shutdownGrace->start(1000);
++        } else {
++            m_process->kill();
++        }
++        // Only an acknowledged cancellation or actual process termination can
++        // release a pending password fallback. Permission to signal may be denied.
++    });
++}
++
++PhoneAuthClient::~PhoneAuthClient()
++{
++    cancel();
++    releaseHelper(m_process, m_committed);
++    m_process = nullptr;
++}
++
++QString PhoneAuthClient::helperPath() const
++{
++    return QStringLiteral("/usr/libexec/navi-auth/authorize");
++}
++
++bool PhoneAuthClient::trustedHelper(const QString &path) const
++{
++    if (!QDir::isAbsolutePath(path)) {
++        return false;
++    }
++    struct stat info;
++    if (lstat(QFile::encodeName(path).constData(), &info) != 0 || !S_ISREG(info.st_mode) || info.st_uid != 0 || !(info.st_mode & S_ISUID)
++        || (info.st_mode & 0022) != 0 || access(QFile::encodeName(path).constData(), X_OK) != 0) {
++        return false;
++    }
++    QString directory = QFileInfo(path).absolutePath();
++    for (;;) {
++        if (lstat(QFile::encodeName(directory).constData(), &info) != 0 || !S_ISDIR(info.st_mode) || info.st_uid != 0 || (info.st_mode & 0022) != 0) {
++            return false;
++        }
++        if (directory == QLatin1String("/")) {
++            return true;
++        }
++        directory = QFileInfo(directory).absolutePath();
++    }
++}
++
++void PhoneAuthClient::start(const QJsonObject &context, const QJsonObject &environment)
++{
++    if (m_state != State::Idle) {
++        return;
++    }
++    if (context.value(QStringLiteral("source")) != QJsonValue(QStringLiteral("kdesu")) || context.value(QStringLiteral("command_hidden")) != QJsonValue(false)
++        || context.value(QStringLiteral("target_user")) != QJsonValue(QStringLiteral("root"))) {
++        fail(i18n("This request requires password authentication."));
++        return;
++    }
++    m_startLine = line({{QStringLiteral("protocol"), protocol},
++                        {QStringLiteral("event"), QStringLiteral("start")},
++                        {QStringLiteral("request_id"), m_requestId},
++                        {QStringLiteral("context"), context},
++                        {QStringLiteral("cwd"), QDir::currentPath()},
++                        {QStringLiteral("environment"), environment}});
++    if (m_startLine.size() > maximumStartBytes || !trustedHelper(helperPath())) {
++        fail(i18n("The phone authentication helper is unavailable or could not be verified."));
++        return;
++    }
++    m_process = new QProcess(this);
++    m_process->setProgram(helperPath());
++    m_process->setArguments({});
++    m_process->setWorkingDirectory(QStringLiteral("/"));
++    QProcessEnvironment helperEnvironment;
++    helperEnvironment.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin:/bin"));
++    helperEnvironment.insert(QStringLiteral("LANG"), QStringLiteral("C.UTF-8"));
++    m_process->setProcessEnvironment(helperEnvironment);
++    m_process->setProcessChannelMode(QProcess::SeparateChannels);
++    connect(m_process, &QProcess::started, this, [this] {
++        m_startTimeout->stop();
++        if (m_state == State::Cancelling) {
++            m_process->closeWriteChannel();
++            return;
++        }
++        m_state = State::Waiting;
++        m_startSent = true;
++        if (m_process->write(m_startLine) != m_startLine.size()) {
++            fail(i18n("Could not send the phone authentication request."));
++            return;
++        }
++        m_startLine.clear();
++        Q_EMIT waitingForPhone();
++    });
++    connect(m_process, &QProcess::readyReadStandardOutput, this, &PhoneAuthClient::readMessages);
++    connect(m_process, &QProcess::readyReadStandardError, this, [this] {
++        // Diagnostics never enter the protocol or accumulate in an unbounded log.
++        m_process->readAllStandardError();
++    });
++    connect(m_process, &QProcess::finished, this, [this] {
++        readMessages(); // A final executed line may arrive together with process exit.
++        if (m_state != State::Finished) {
++            fail(m_failure.isEmpty() ? i18n("The phone authentication helper exited.") : m_failure);
++        }
++    });
++    connect(m_process, &QProcess::errorOccurred, this, [this] {
++        readMessages();
++        if (m_state != State::Finished) {
++            fail(i18n("The phone authentication helper is unavailable."));
++        }
++    });
++    m_state = State::Starting;
++    m_startTimeout->start();
++    m_lifetime->start();
++    m_process->start(QIODevice::ReadWrite);
++}
++
++QByteArray PhoneAuthClient::message(const QString &event) const
++{
++    return line({{QStringLiteral("protocol"), protocol}, {QStringLiteral("event"), event}, {QStringLiteral("request_id"), m_requestId}});
++}
++
++bool PhoneAuthClient::pending() const
++{
++    return m_state == State::Starting || m_state == State::Waiting || m_state == State::Cancelling;
++}
++
++bool PhoneAuthClient::committed() const
++{
++    return m_committed;
++}
++
++void PhoneAuthClient::commit()
++{
++    if (m_state != State::Waiting || !m_ready) {
++        return;
++    }
++    m_committed = true;
++    m_state = State::Committed;
++    // This is a receipt/launch-ack deadline, not an extension of approval freshness.
++    m_lifetime->start(20000);
++    const QByteArray commitLine = message(QStringLiteral("commit"));
++    if (m_process->write(commitLine) != commitLine.size()) {
++        fail(i18n("Could not confirm the phone-authorized execution."));
++    }
++}
++
++void PhoneAuthClient::withdraw()
++{
++    if (m_withdrawing || !m_process) {
++        return;
++    }
++    m_withdrawing = true;
++    if (m_startSent) {
++        m_process->write(message(QStringLiteral("cancel")));
++    }
++    m_process->closeWriteChannel();
++    m_shutdownGrace->start(withdrawalGraceMs);
++}
++
++void PhoneAuthClient::cancel()
++{
++    if (m_state == State::Finished || m_committed || m_cancelRequested) {
++        return;
++    }
++    m_cancelRequested = true;
++    m_state = State::Cancelling;
++    if (!m_process || m_process->state() == QProcess::NotRunning) {
++        finish();
++        Q_EMIT canceled();
++        return;
++    }
++    withdraw();
++}
++
++void PhoneAuthClient::finish()
++{
++    m_state = State::Finished;
++    m_startTimeout->stop();
++    m_lifetime->stop();
++    m_shutdownGrace->stop();
++    m_startLine.clear();
++    m_input.clear();
++    releaseHelper(m_process, m_committed);
++    m_process = nullptr;
++}
++
++void PhoneAuthClient::fail(const QString &message)
++{
++    if (m_state == State::Finished) {
++        return;
++    }
++    if (!m_committed && m_process && m_process->state() != QProcess::NotRunning) {
++        m_failure = message;
++        m_input.clear();
++        m_state = State::Cancelling;
++        withdraw();
++        return;
++    }
++    finish();
++    if (m_committed) {
++        Q_EMIT uncertain(message);
++    } else if (m_cancelRequested) {
++        Q_EMIT canceled();
++    } else {
++        Q_EMIT unavailable(message);
++    }
++}
++
++void PhoneAuthClient::readMessages()
++{
++    if (m_state == State::Finished || !m_process) {
++        return;
++    }
++    m_input += m_process->read(maximumReplyBytes + 1 - m_input.size());
++    qsizetype newline;
++    while ((newline = m_input.indexOf('\n')) >= 0) {
++        if (newline + 1 > maximumReplyBytes) {
++            fail(i18n("The phone authentication helper sent an invalid response."));
++            return;
++        }
++        const QJsonDocument document = QJsonDocument::fromJson(m_input.left(newline));
++        m_input.remove(0, newline + 1);
++        const QJsonObject reply = document.object();
++        if (!document.isObject() || reply.value(QStringLiteral("protocol")) != QJsonValue(protocol)
++            || reply.value(QStringLiteral("request_id")) != QJsonValue(m_requestId)) {
++            fail(i18n("The phone authentication response did not match this request."));
++            return;
++        }
++        const QString event = reply.value(QStringLiteral("event")).toString();
++        if (event == QLatin1String("ready") && m_state == State::Cancelling) {
++            continue;
++        }
++        if (event == QLatin1String("ready") && m_state == State::Waiting && !m_ready) {
++            m_ready = true;
++            Q_EMIT ready();
++        } else if (event == QLatin1String("canceled") && !m_committed && pending()) {
++            const bool canceledByUser = m_cancelRequested;
++            const QString failure = m_failure;
++            finish();
++            if (!canceledByUser && !failure.isEmpty()) {
++                Q_EMIT unavailable(failure);
++            } else {
++                Q_EMIT canceled();
++            }
++            return;
++        } else if (event == QLatin1String("executed") && m_state == State::Committed && reply.value(QStringLiteral("pid")).isDouble()) {
++            const double pid = reply.value(QStringLiteral("pid")).toDouble();
++            if (pid < 1 || pid > 2147483647 || pid != qint64(pid)) {
++                fail(i18n("The phone authentication helper returned an invalid process ID."));
++                return;
++            }
++            finish();
++            Q_EMIT executed(qint64(pid));
++            return;
++        } else if (event == QLatin1String("error") && reply.value(QStringLiteral("message")).isString()) {
++            const QString message = reply.value(QStringLiteral("message")).toString().left(512);
++            if (m_committed) {
++                fail(message);
++            } else {
++                // A matching precommit error is the helper's terminal rejection.
++                finish();
++                if (m_cancelRequested) {
++                    Q_EMIT canceled();
++                } else {
++                    Q_EMIT unavailable(message);
++                }
++            }
++            return;
++        } else {
++            fail(i18n("The phone authentication helper returned an unexpected response."));
++            return;
++        }
++        if (m_state == State::Finished) {
++            return;
++        }
++    }
++    if (m_input.size() >= maximumReplyBytes) {
++        fail(i18n("The phone authentication helper sent an oversized response."));
++    }
++    if (m_process && m_process->bytesAvailable() > 0) {
++        QMetaObject::invokeMethod(this, &PhoneAuthClient::readMessages, Qt::QueuedConnection);
++    }
++}
++
++#include "moc_phoneauthclient.cpp"
+diff --git a/kdesu/phoneauthclient.h b/kdesu/phoneauthclient.h
+new file mode 100644
+index 00000000..f4da7594
+--- /dev/null
++++ b/kdesu/phoneauthclient.h
+@@ -0,0 +1,70 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++#pragma once
++
++#include <QJsonObject>
++#include <QObject>
++
++class QProcess;
++class QTimer;
++
++class PhoneAuthClient : public QObject
++{
++    Q_OBJECT
++public:
++    explicit PhoneAuthClient(QObject *parent = nullptr);
++    ~PhoneAuthClient() override;
++
++    void start(const QJsonObject &context, const QJsonObject &environment);
++    void commit();
++    void cancel();
++    bool pending() const;
++    bool committed() const;
++
++Q_SIGNALS:
++    void waitingForPhone();
++    void ready();
++    void executed(qint64 pid);
++    void canceled();
++    void unavailable(const QString &message);
++    void uncertain(const QString &message);
++
++protected:
++    // Test subclasses use a private fake helper. Production has no runtime override.
++    virtual QString helperPath() const;
++    virtual bool trustedHelper(const QString &path) const;
++
++private:
++    enum class State {
++        Idle,
++        Starting,
++        Waiting,
++        Cancelling,
++        Committed,
++        Finished
++    };
++    void readMessages();
++    void fail(const QString &message);
++    void finish();
++    void withdraw();
++    QByteArray message(const QString &event) const;
++
++    QProcess *m_process = nullptr;
++    QTimer *m_startTimeout;
++    QTimer *m_lifetime;
++    QTimer *m_shutdownGrace;
++    State m_state = State::Idle;
++    QString m_requestId;
++    QByteArray m_startLine;
++    QByteArray m_input;
++    QString m_failure;
++    bool m_startSent = false;
++    bool m_ready = false;
++    bool m_committed = false;
++    bool m_cancelRequested = false;
++    bool m_withdrawing = false;
++    bool m_terminationAttempted = false;
++};
+diff --git a/kdesu/phonenotification.cpp b/kdesu/phonenotification.cpp
+new file mode 100644
+index 00000000..46fadc23
+--- /dev/null
++++ b/kdesu/phonenotification.cpp
+@@ -0,0 +1,164 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++#include "phonenotification.h"
++
++#include <QBuffer>
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QIcon>
++#include <QJsonDocument>
++#include <QLocalSocket>
++#include <QStandardPaths>
++#include <QTimer>
++#include <QUuid>
++
++#include <sys/stat.h>
++#include <unistd.h>
++#ifdef Q_OS_LINUX
++#include <sys/socket.h>
++#endif
++
++namespace
++{
++constexpr qsizetype maximumEventBytes = 64 * 1024;
++constexpr qsizetype maximumIconBytes = 16 * 1024;
++
++QByteArray eventLine(const QJsonObject &event)
++{
++    return QJsonDocument(event).toJson(QJsonDocument::Compact) + '\n';
++}
++
++bool privateSocket(const QString &path)
++{
++    struct stat directory;
++    struct stat socket;
++    return !path.isEmpty() && lstat(QFile::encodeName(QFileInfo(path).absolutePath()).constData(), &directory) == 0 && S_ISDIR(directory.st_mode)
++        && directory.st_uid == getuid() && (directory.st_mode & 0077) == 0 && lstat(QFile::encodeName(path).constData(), &socket) == 0
++        && S_ISSOCK(socket.st_mode) && socket.st_uid == getuid() && (socket.st_mode & 0077) == 0;
++}
++
++bool sameUserPeer(qintptr descriptor)
++{
++#ifdef Q_OS_LINUX
++    struct ucred peer;
++    socklen_t length = sizeof(peer);
++    return getsockopt(int(descriptor), SOL_SOCKET, SO_PEERCRED, &peer, &length) == 0 && length == sizeof(peer) && peer.uid == getuid();
++#else
++    Q_UNUSED(descriptor)
++    return false;
++#endif
++}
++}
++
++PhoneNotification::PhoneNotification(const QString &socketPath, QObject *parent)
++    : QObject(parent)
++    , m_socketPath(socketPath)
++    , m_requestId(QUuid::createUuid().toString(QUuid::WithoutBraces))
++    , m_socket(new QLocalSocket(this))
++    , m_connectTimeout(new QTimer(this))
++{
++    if (m_socketPath.isEmpty()) {
++        const QString runtime = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
++        if (!runtime.isEmpty()) {
++            m_socketPath = QDir(runtime).filePath(QStringLiteral("navi-auth/events.sock"));
++        }
++    }
++    m_connectTimeout->setSingleShot(true);
++    m_connectTimeout->setInterval(1500);
++    connect(m_connectTimeout, &QTimer::timeout, this, [this] {
++        finish(QStringLiteral("unavailable"));
++    });
++    connect(m_socket, &QLocalSocket::connected, this, [this] {
++        m_connectTimeout->stop();
++        if (m_finished || !sameUserPeer(m_socket->socketDescriptor())) {
++            finish(QStringLiteral("unavailable"));
++            return;
++        }
++        m_started = m_socket->write(m_startLine) == m_startLine.size();
++        m_startLine.clear();
++        if (m_started) {
++            m_socket->flush();
++        } else {
++            finish(QStringLiteral("unavailable"));
++        }
++    });
++    connect(m_socket, &QLocalSocket::disconnected, this, [this] {
++        m_finished = true;
++        m_connectTimeout->stop();
++    });
++    connect(m_socket, &QLocalSocket::errorOccurred, this, [this] {
++        finish(QStringLiteral("unavailable"));
++    });
++    // The channel has no approval response. Bound and discard any unsolicited input.
++    m_socket->setReadBufferSize(4096);
++    connect(m_socket, &QLocalSocket::readyRead, this, [this] {
++        m_socket->readAll();
++    });
++}
++
++PhoneNotification::~PhoneNotification()
++{
++    finish(QStringLiteral("closed"));
++    // Destruction also closes the connection: the host must withdraw on EOF.
++}
++
++void PhoneNotification::start(const QJsonObject &context)
++{
++    if (m_attempted || m_finished) {
++        return;
++    }
++    m_attempted = true;
++    m_startLine = eventLine({{QStringLiteral("protocol"), QStringLiteral("navi-auth-desktop/v1")},
++                             {QStringLiteral("event"), QStringLiteral("start")},
++                             {QStringLiteral("request_id"), m_requestId},
++                             {QStringLiteral("mode"), QStringLiteral("notification-only")},
++                             {QStringLiteral("context"), context}});
++    if (m_startLine.size() > maximumEventBytes || !privateSocket(m_socketPath)) {
++        finish(QStringLiteral("unavailable"));
++        return;
++    }
++    m_connectTimeout->start();
++    m_socket->connectToServer(m_socketPath, QIODevice::ReadWrite);
++}
++
++void PhoneNotification::finish(const QString &reason)
++{
++    if (m_finished) {
++        return;
++    }
++    m_finished = true;
++    m_connectTimeout->stop();
++    m_startLine.clear();
++    if (m_started && m_socket->state() == QLocalSocket::ConnectedState) {
++        m_socket->write(eventLine({{QStringLiteral("protocol"), QStringLiteral("navi-auth-desktop/v1")},
++                                   {QStringLiteral("event"), QStringLiteral("cancel")},
++                                   {QStringLiteral("request_id"), m_requestId},
++                                   {QStringLiteral("reason"), reason}}));
++        m_socket->flush();
++        m_socket->disconnectFromServer();
++    } else {
++        m_socket->abort();
++    }
++}
++
++QString PhoneNotification::iconPngBase64(const QIcon &icon)
++{
++    // Use physical pixel dimensions independent of the desktop's scale factor.
++    for (const int size : {128, 96, 64, 48, 32}) {
++        const QPixmap pixmap = icon.pixmap(QSize(size, size), 1.0);
++        if (pixmap.isNull()) {
++            return {};
++        }
++        QByteArray png;
++        QBuffer buffer(&png);
++        buffer.open(QIODevice::WriteOnly);
++        if (pixmap.toImage().save(&buffer, "PNG") && png.size() <= maximumIconBytes) {
++            return QString::fromLatin1(png.toBase64());
++        }
++    }
++    return {};
++}
+diff --git a/kdesu/phonenotification.h b/kdesu/phonenotification.h
+new file mode 100644
+index 00000000..572b4632
+--- /dev/null
++++ b/kdesu/phonenotification.h
+@@ -0,0 +1,36 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++#pragma once
++
++#include <QJsonObject>
++#include <QObject>
++
++class QIcon;
++class QLocalSocket;
++class QTimer;
++
++// Display metadata only. Neither this transport nor its peer grants authority.
++class PhoneNotification : public QObject
++{
++public:
++    explicit PhoneNotification(const QString &socketPath = {}, QObject *parent = nullptr);
++    ~PhoneNotification() override;
++
++    void start(const QJsonObject &context);
++    void finish(const QString &reason);
++
++    static QString iconPngBase64(const QIcon &icon);
++
++private:
++    QString m_socketPath;
++    QString m_requestId;
++    QByteArray m_startLine;
++    QLocalSocket *m_socket;
++    QTimer *m_connectTimeout;
++    bool m_attempted = false;
++    bool m_started = false;
++    bool m_finished = false;
++};
+diff --git a/kdesu/programinfo.cpp b/kdesu/programinfo.cpp
+new file mode 100644
+index 00000000..3f9a8ca0
+--- /dev/null
++++ b/kdesu/programinfo.cpp
+@@ -0,0 +1,42 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++#include "programinfo.h"
++
++#include <KDesktopFile>
++#include <QFileInfo>
++#include <QStandardPaths>
++
++ProgramInfo programInfo(const QString &executable)
++{
++    const QString name = QFileInfo(executable).fileName();
++    ProgramInfo info{name, QIcon::fromTheme(name, QIcon::fromTheme(QStringLiteral("application-x-executable")))};
++    if (name.isEmpty()) {
++        return info;
++    }
++    // An arbitrary path with the same basename is not the desktop application.
++    if (executable.contains(QLatin1Char('/'))
++        && (QFileInfo(executable).canonicalFilePath().isEmpty()
++            || QFileInfo(executable).canonicalFilePath() != QFileInfo(QStandardPaths::findExecutable(name)).canonicalFilePath())) {
++        return {executable, QIcon::fromTheme(QStringLiteral("application-x-executable"))};
++    }
++    // The CLI does not necessarily install a desktop entry or an icon.
++    if (name == QLatin1String("codex")) {
++        info.name = QStringLiteral("Codex");
++        info.icon =
++            QIcon::fromTheme(QStringLiteral("codex"), QIcon::fromTheme(QStringLiteral("com.openai.codex"), QIcon(QStringLiteral(":/kdesu/icons/codex.svg"))));
++    }
++    const QStringList desktopNames = {name + QStringLiteral(".desktop"), QStringLiteral("org.kde.") + name + QStringLiteral(".desktop")};
++    for (const QString &desktopName : desktopNames) {
++        const QString path = QStandardPaths::locate(QStandardPaths::ApplicationsLocation, desktopName);
++        if (!path.isEmpty()) {
++            const KDesktopFile desktop(path);
++            info.name = desktop.readName().isEmpty() ? name : desktop.readName();
++            info.icon = QIcon::fromTheme(desktop.readIcon(), info.icon);
++            break;
++        }
++    }
++    return info;
++}
+diff --git a/kdesu/programinfo.h b/kdesu/programinfo.h
+new file mode 100644
+index 00000000..12513883
+--- /dev/null
++++ b/kdesu/programinfo.h
+@@ -0,0 +1,16 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++#pragma once
++
++#include <QIcon>
++#include <QString>
++
++struct ProgramInfo {
++    QString name;
++    QIcon icon;
++};
++
++ProgramInfo programInfo(const QString &executable);
+diff --git a/kdesu/tests/CMakeLists.txt b/kdesu/tests/CMakeLists.txt
+new file mode 100644
+index 00000000..08526f83
+--- /dev/null
++++ b/kdesu/tests/CMakeLists.txt
+@@ -0,0 +1,20 @@
++add_executable(kdesu_dialog_test dialogtest.cpp)
++target_link_libraries(kdesu_dialog_test kdesu_dialog Qt::Test)
++ecm_mark_as_test(kdesu_dialog_test)
++add_test(NAME kdesu_dialog_test COMMAND kdesu_dialog_test)
++set_tests_properties(kdesu_dialog_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
++
++add_executable(kdesu_fake_authority fakeauthority.cpp)
++target_link_libraries(kdesu_fake_authority Qt::Core)
++
++add_executable(kdesu_phoneauth_test phoneauthtest.cpp)
++add_dependencies(kdesu_phoneauth_test kdesu_fake_authority)
++target_link_libraries(kdesu_phoneauth_test kdesu_dialog Qt::Test)
++ecm_mark_as_test(kdesu_phoneauth_test)
++add_test(NAME kdesu_phoneauth_test COMMAND kdesu_phoneauth_test)
++set_tests_properties(kdesu_phoneauth_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
++
++# This preview never authenticates or executes a command and is not installed.
++find_package(KF6ColorScheme ${KF6_MIN_VERSION} REQUIRED)
++add_executable(kdesu_dialog_preview dialogpreview.cpp)
++target_link_libraries(kdesu_dialog_preview kdesu_dialog KF6::ColorScheme)
+diff --git a/kdesu/tests/dialogpreview.cpp b/kdesu/tests/dialogpreview.cpp
+new file mode 100644
+index 00000000..067feaa3
+--- /dev/null
++++ b/kdesu/tests/dialogpreview.cpp
+@@ -0,0 +1,96 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++#include "../phonenotification.h"
++#include "../sudlg.h"
++
++#include <KColorScheme>
++#include <KLocalizedString>
++#include <QApplication>
++#include <QCommandLineParser>
++#include <QFont>
++#include <QStandardPaths>
++#include <QTimer>
++#include <QToolButton>
++
++class PreviewDialog : public KDEsuDialog
++{
++public:
++    using KDEsuDialog::KDEsuDialog;
++
++protected:
++    bool checkPassword() override
++    {
++        showErrorMessage(i18n("Preview only. No password was checked and no command will run."));
++        return false;
++    }
++};
++
++int main(int argc, char **argv)
++{
++    QApplication app(argc, argv);
++    app.setApplicationName(QStringLiteral("kdesu-dialog-preview"));
++    KLocalizedString::setApplicationDomain(QByteArrayLiteral("kdesu"));
++    QCommandLineParser parser;
++    parser.addHelpOption();
++    parser.addOptions(
++        {{{QStringLiteral("c"), QStringLiteral("command")},
++          QStringLiteral("Command to display; never executed"),
++          QStringLiteral("command"),
++          QStringLiteral("systemsettings kcm_users")},
++         {QStringLiteral("screenshot"), QStringLiteral("Save a PNG and exit"), QStringLiteral("path")},
++         {QStringLiteral("expanded"), QStringLiteral("Expand the command breakdown")},
++         {QStringLiteral("hidden"), QStringLiteral("Hide the command")},
++         {QStringLiteral("notify-phone"), QStringLiteral("Send notification-only lifecycle events to the local phone bridge")},
++         {QStringLiteral("rtl"), QStringLiteral("Use right-to-left layout")},
++         {QStringLiteral("palette"), QStringLiteral("Preview a named KDE color scheme, such as BreezeLight or BreezeDark"), QStringLiteral("name")},
++         {QStringLiteral("font-scale"), QStringLiteral("Scale the application font"), QStringLiteral("factor"), QStringLiteral("1")},
++         {QStringLiteral("width"), QStringLiteral("Preview width"), QStringLiteral("pixels")},
++         {QStringLiteral("height"), QStringLiteral("Preview height"), QStringLiteral("pixels")}});
++    parser.process(app);
++    QFont font = app.font();
++    font.setPointSizeF(font.pointSizeF() * parser.value(QStringLiteral("font-scale")).toDouble());
++    app.setFont(font);
++    if (parser.isSet(QStringLiteral("palette"))) {
++        const QString scheme =
++            QStandardPaths::locate(QStandardPaths::GenericDataLocation, QStringLiteral("color-schemes/%1.colors").arg(parser.value(QStringLiteral("palette"))));
++        if (scheme.isEmpty()) {
++            parser.showHelp(1);
++        }
++        app.setPalette(KColorScheme::createApplicationPalette(KSharedConfig::openConfig(scheme)));
++    }
++    if (parser.isSet(QStringLiteral("rtl"))) {
++        app.setLayoutDirection(Qt::RightToLeft);
++    }
++    PreviewDialog dialog({.user = "root",
++                          .authUser = "root",
++                          .command = parser.value(QStringLiteral("command")),
++                          .showCommand = !parser.isSet(QStringLiteral("hidden")),
++                          .enableKeep = true,
++                          .withIgnoreButton = true});
++    dialog.setWindowTitle(i18n("KDE su — Design preview"));
++    if (parser.isSet(QStringLiteral("notify-phone"))) {
++        auto *notification = new PhoneNotification({}, &dialog);
++        QObject::connect(&dialog, &KDEsuDialog::notificationRequested, notification, [notification](QJsonObject context) {
++            context.insert(QStringLiteral("source"), QStringLiteral("kdesu-preview"));
++            notification->start(context);
++        });
++        QObject::connect(&dialog, &KDEsuDialog::notificationWithdrawn, notification, &PhoneNotification::finish);
++    }
++    if (auto *toggle = dialog.findChild<QToolButton *>(QStringLiteral("explainCommand"))) {
++        toggle->setChecked(parser.isSet(QStringLiteral("expanded")));
++    }
++    dialog.show();
++    if (parser.isSet(QStringLiteral("width")) || parser.isSet(QStringLiteral("height"))) {
++        dialog.resize(parser.isSet(QStringLiteral("width")) ? parser.value(QStringLiteral("width")).toInt() : dialog.width(),
++                      parser.isSet(QStringLiteral("height")) ? parser.value(QStringLiteral("height")).toInt() : dialog.height());
++    }
++    if (parser.isSet(QStringLiteral("screenshot"))) {
++        QTimer::singleShot(300, &dialog, [&] {
++            app.exit(dialog.grab().save(parser.value(QStringLiteral("screenshot"))) ? 0 : 1);
++        });
++    }
++    return app.exec();
++}
+diff --git a/kdesu/tests/dialogtest.cpp b/kdesu/tests/dialogtest.cpp
+new file mode 100644
+index 00000000..be33bdd0
+--- /dev/null
++++ b/kdesu/tests/dialogtest.cpp
+@@ -0,0 +1,469 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++#include "../commanddetails.h"
++#include "../phonenotification.h"
++#include "../programinfo.h"
++#include "../sudlg.h"
++
++#include <KLocalizedString>
++#include <KMessageWidget>
++#include <KPasswordLineEdit>
++#include <KUser>
++#include <QAccessible>
++#include <QDialogButtonBox>
++#include <QFile>
++#include <QJsonDocument>
++#include <QLabel>
++#include <QLocalServer>
++#include <QLocalSocket>
++#include <QPlainTextEdit>
++#include <QPushButton>
++#include <QScopeGuard>
++#include <QScrollArea>
++#include <QSignalSpy>
++#include <QTemporaryDir>
++#include <QTest>
++#include <QTextBrowser>
++#include <QToolButton>
++#include <QUuid>
++
++#include <memory>
++
++class TestDialog : public KDEsuDialog
++{
++public:
++    using KDEsuDialog::KDEsuDialog;
++    bool authenticated = false;
++    bool fatal = false;
++    int attempts = 0;
++
++    bool checkPassword() override
++    {
++        ++attempts;
++        if (!authenticated) {
++            showErrorMessage(QStringLiteral("Test authentication error"), fatal);
++        }
++        return authenticated;
++    }
++};
++
++class DialogTest : public QObject
++{
++    Q_OBJECT
++
++private Q_SLOTS:
++    void initTestCase()
++    {
++        KLocalizedString::setApplicationDomain(QByteArrayLiteral("kdesu"));
++    }
++
++    void shellExpressions_data()
++    {
++        QTest::addColumn<QString>("command");
++        for (const auto &command : {"echo hello && touch /tmp/never-execute",
++                                    "cat /etc/passwd | head",
++                                    "echo $(id)",
++                                    "echo `id`",
++                                    "echo $HOME",
++                                    "cat *.conf",
++                                    "echo hi > /tmp/never-execute",
++                                    "VAR=value program",
++                                    "cd /tmp",
++                                    "echo ~/file",
++                                    "echo one\necho two",
++                                    "echo 'unclosed",
++                                    "if true",
++                                    "",
++                                    "'' argument"}) {
++            QTest::newRow(command) << QString::fromLatin1(command);
++        }
++    }
++
++    void shellExpressions()
++    {
++        QFETCH(QString, command);
++        const auto details = describeCommand(command);
++        QVERIFY(details.arguments.isEmpty());
++        QVERIFY(!details.explanation.isEmpty());
++    }
++
++    void literalArguments()
++    {
++        const auto details = describeCommand(QStringLiteral("/usr/bin/example --name='two words' '' '$(not-executed)' '<b>literal</b>'"));
++        QCOMPARE(details.arguments,
++                 QStringList({QStringLiteral("/usr/bin/example"),
++                              QStringLiteral("--name=two words"),
++                              QString(),
++                              QStringLiteral("$(not-executed)"),
++                              QStringLiteral("<b>literal</b>")}));
++    }
++
++    void commandPrivacy()
++    {
++        TestDialog dialog({.user = "root", .authUser = "root", .command = QStringLiteral("private-program private-value"), .showCommand = false});
++        QVERIFY(!dialog.findChild<QPlainTextEdit *>(QStringLiteral("commandText")));
++        QVERIFY(!dialog.findChild<QTextBrowser *>(QStringLiteral("commandExplanation")));
++        for (auto *label : dialog.findChildren<QLabel *>()) {
++            QVERIFY(!label->text().contains(QLatin1String("private-")));
++        }
++    }
++
++    void commandIsReadOnlyAndLiteral()
++    {
++        const QString command = QStringLiteral("printf '%s' '<b>not markup</b>'");
++        TestDialog dialog({.user = "root", .authUser = "root", .command = command});
++        auto *text = dialog.findChild<QPlainTextEdit *>(QStringLiteral("commandText"));
++        QVERIFY(text->isReadOnly());
++        QCOMPARE(text->toPlainText(), command);
++        QVERIFY(dialog.findChild<QTextBrowser *>()->toPlainText().contains(QLatin1String("<b>not markup</b>")));
++        auto *accessible = QAccessible::queryAccessibleInterface(text);
++        QVERIFY(accessible);
++        QVERIFY(!accessible->text(QAccessible::Name).isEmpty());
++    }
++
++    void executablePathIsNotMisidentified()
++    {
++        TestDialog dialog({.user = "root", .authUser = "root", .command = QStringLiteral("/tmp/systemsettings kcm_users")});
++        QCOMPARE(dialog.findChild<QLabel *>(QStringLiteral("programName"))->text(), QStringLiteral("/tmp/systemsettings"));
++    }
++
++    void requesterIsIndependentOfTarget()
++    {
++        TestDialog settings(
++            {.user = "root", .authUser = "root", .command = QStringLiteral("systemsettings kcm_users"), .icon = QStringLiteral("systemsettings")});
++        TestDialog terminal({.user = "root", .authUser = "root", .command = QStringLiteral("true"), .icon = QStringLiteral("utilities-terminal")});
++        auto *requester = settings.findChild<QLabel *>(QStringLiteral("requester"));
++        QVERIFY(!requester->text().isEmpty());
++        QCOMPARE(requester->text(), terminal.findChild<QLabel *>(QStringLiteral("requester"))->text());
++        QVERIFY(requester->text() != settings.findChild<QLabel *>(QStringLiteral("programName"))->text());
++        const QPixmap requesterIcon = settings.findChild<QLabel *>(QStringLiteral("requesterIcon"))->pixmap();
++        QVERIFY(!requesterIcon.isNull());
++        QCOMPARE(requesterIcon.toImage(), terminal.findChild<QLabel *>(QStringLiteral("requesterIcon"))->pixmap().toImage());
++        QVERIFY(requester->accessibleDescription().contains(QLatin1String("Requesting process:")));
++    }
++
++    void codexIdentityWithoutDesktopEntry()
++    {
++        QTemporaryDir directory;
++        QVERIFY(directory.isValid());
++        const QString executable = directory.filePath(QStringLiteral("codex"));
++        QFile file(executable);
++        QVERIFY(file.open(QIODevice::WriteOnly));
++        file.close();
++        QVERIFY(file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
++        const QByteArray previousPath = qgetenv("PATH");
++        const auto restorePath = qScopeGuard([&] {
++            qputenv("PATH", previousPath);
++        });
++        qputenv("PATH", directory.path().toLocal8Bit());
++        const ProgramInfo codex = programInfo(executable);
++        QCOMPARE(codex.name, QStringLiteral("Codex"));
++        QVERIFY(!codex.icon.pixmap(56, 56).isNull());
++        QVERIFY(!QIcon(QStringLiteral(":/kdesu/icons/codex.svg")).pixmap(56, 56).isNull());
++
++        // A matching basename outside PATH must not inherit Codex branding.
++        QTemporaryDir unrelated;
++        const QString unrelatedPath = unrelated.filePath(QStringLiteral("codex"));
++        QVERIFY(QFile::copy(executable, unrelatedPath));
++        QCOMPARE(programInfo(unrelatedPath).name, unrelatedPath);
++    }
++
++    void authenticationIdentity()
++    {
++        const QByteArray login = KUser(KUser::UseRealUserID).loginName().toLocal8Bit();
++        TestDialog own({.user = "root", .authUser = login, .command = QStringLiteral("true")});
++        QVERIFY(own.findChild<QLabel *>(QStringLiteral("passwordLabel"))->text().contains(QString::fromLocal8Bit(login)));
++        TestDialog other({.user = "root", .authUser = "another-account", .command = QStringLiteral("true")});
++        QVERIFY(other.findChild<QLabel *>(QStringLiteral("passwordLabel"))->text().contains(QLatin1String("another-account")));
++    }
++
++    void notificationContextAndPrivacy()
++    {
++        TestDialog dialog(
++            {.user = "root", .authUser = "root", .command = QStringLiteral("systemsettings kcm_users"), .icon = QStringLiteral("utilities-terminal")});
++        QSignalSpy started(&dialog, &KDEsuDialog::notificationRequested);
++        QSignalSpy withdrawn(&dialog, &KDEsuDialog::notificationWithdrawn);
++        QCOMPARE(started.size(), 0);
++        dialog.show();
++        QCOMPARE(started.size(), 1);
++        const QJsonObject context = started.first().first().toJsonObject();
++        QCOMPARE(context.value(QStringLiteral("application")).toString(), dialog.findChild<QLabel *>(QStringLiteral("requester"))->text());
++        QCOMPARE(context.value(QStringLiteral("command")).toString(), QStringLiteral("systemsettings kcm_users"));
++        QCOMPARE(context.value(QStringLiteral("target_user")).toString(), QStringLiteral("root"));
++        QCOMPARE(context.value(QStringLiteral("requesting_user")).toString(), KUser(KUser::UseRealUserID).loginName());
++        QVERIFY(!context.value(QStringLiteral("command_hidden")).toBool());
++        QVERIFY(!context.value(QStringLiteral("icon_png_base64")).toString().isEmpty());
++        dialog.hide();
++        dialog.show();
++        QCOMPARE(started.size(), 1);
++        dialog.reject();
++        QCOMPARE(withdrawn.size(), 1);
++        QCOMPARE(withdrawn.first().first().toString(), QStringLiteral("dismissed"));
++
++        TestDialog hidden({.user = "root", .authUser = "root", .command = QStringLiteral("private-program private-value"), .showCommand = false});
++        QSignalSpy hiddenStart(&hidden, &KDEsuDialog::notificationRequested);
++        hidden.show();
++        const QJsonObject hiddenContext = hiddenStart.first().first().toJsonObject();
++        QVERIFY(hiddenContext.value(QStringLiteral("command_hidden")).toBool());
++        QCOMPARE(hiddenContext.value(QStringLiteral("command")).toString(), QString());
++        QVERIFY(!QJsonDocument(hiddenContext).toJson().contains("private-"));
++        QCOMPARE(hiddenContext.value(QStringLiteral("icon_png_base64")), context.value(QStringLiteral("icon_png_base64")));
++    }
++
++    void notificationWithdrawal_data()
++    {
++        QTest::addColumn<QString>("reason");
++        QTest::newRow("password") << QStringLiteral("authenticated");
++        QTest::newRow("ignore") << QStringLiteral("run-as-user");
++        QTest::newRow("fatal") << QStringLiteral("unavailable");
++        QTest::newRow("destruction") << QStringLiteral("closed");
++    }
++
++    void notificationWithdrawal()
++    {
++        QFETCH(QString, reason);
++        auto dialog =
++            std::make_unique<TestDialog>(KDEsuRequest{.user = "root", .authUser = "root", .command = QStringLiteral("true"), .withIgnoreButton = true});
++        QSignalSpy withdrawn(dialog.get(), &KDEsuDialog::notificationWithdrawn);
++        dialog->show();
++        if (reason == QLatin1String("closed")) {
++            dialog.reset();
++        } else if (reason == QLatin1String("run-as-user")) {
++            dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ignore)->click();
++        } else {
++            dialog->authenticated = reason == QLatin1String("authenticated");
++            dialog->fatal = !dialog->authenticated;
++            dialog->accept();
++        }
++        QTRY_COMPARE(withdrawn.size(), 1);
++        QCOMPARE(withdrawn.first().first().toString(), reason);
++        if (reason == QLatin1String("run-as-user")) {
++            QCOMPARE(dialog->attempts, 0);
++        }
++        dialog.reset();
++        QCOMPARE(withdrawn.size(), 1);
++    }
++
++    void failedPasswordKeepsNotification()
++    {
++        TestDialog dialog({.user = "root", .authUser = "root", .command = QStringLiteral("true")});
++        QSignalSpy withdrawn(&dialog, &KDEsuDialog::notificationWithdrawn);
++        dialog.show();
++        dialog.accept();
++        QTRY_COMPARE(dialog.attempts, 1);
++        QCOMPARE(withdrawn.size(), 0);
++        dialog.reject();
++        QCOMPARE(withdrawn.size(), 1);
++    }
++
++    void notificationSocketLifecycleAndNoAuthority()
++    {
++        QTemporaryDir directory;
++        QVERIFY(directory.isValid());
++        QLocalServer server;
++        server.setSocketOptions(QLocalServer::UserAccessOption);
++        QVERIFY(server.listen(directory.filePath(QStringLiteral("events.sock"))));
++        TestDialog dialog({.user = "root", .authUser = "root", .command = QStringLiteral("printf '%s' 'line\nbreak'")});
++        PhoneNotification notification(server.fullServerName());
++        connect(&dialog, &KDEsuDialog::notificationRequested, &notification, &PhoneNotification::start);
++        connect(&dialog, &KDEsuDialog::notificationWithdrawn, &notification, &PhoneNotification::finish);
++        QSignalSpy accepted(&dialog, &QDialog::accepted);
++        dialog.show();
++        QTRY_VERIFY(server.hasPendingConnections());
++        std::unique_ptr<QLocalSocket> peer(server.nextPendingConnection());
++        QTRY_VERIFY(peer->canReadLine());
++        const QJsonObject start = QJsonDocument::fromJson(peer->readLine()).object();
++        QCOMPARE(start.value(QStringLiteral("event")).toString(), QStringLiteral("start"));
++        QCOMPARE(start.value(QStringLiteral("protocol")).toString(), QStringLiteral("navi-auth-desktop/v1"));
++        QCOMPARE(start.value(QStringLiteral("mode")).toString(), QStringLiteral("notification-only"));
++        QVERIFY(!QUuid(start.value(QStringLiteral("request_id")).toString()).isNull());
++        QCOMPARE(start.value(QStringLiteral("context")).toObject().value(QStringLiteral("command")).toString(), QStringLiteral("printf '%s' 'line\nbreak'"));
++        QVERIFY(!peer->canReadLine());
++        peer->write("{\"approved\":true}\n");
++        peer->flush();
++        QTest::qWait(30);
++        QCOMPARE(accepted.size(), 0);
++        QCOMPARE(dialog.attempts, 0);
++        QVERIFY(dialog.isVisible());
++        dialog.reject();
++        QTRY_VERIFY(peer->canReadLine());
++        const QJsonObject cancel = QJsonDocument::fromJson(peer->readLine()).object();
++        QCOMPARE(cancel.value(QStringLiteral("event")).toString(), QStringLiteral("cancel"));
++        QCOMPARE(cancel.value(QStringLiteral("reason")).toString(), QStringLiteral("dismissed"));
++        QCOMPARE(cancel.value(QStringLiteral("request_id")), start.value(QStringLiteral("request_id")));
++        notification.finish(QStringLiteral("closed"));
++        QTRY_COMPARE(peer->state(), QLocalSocket::UnconnectedState);
++        QVERIFY(!peer->canReadLine());
++    }
++
++    void notificationCancellationDuringConnect()
++    {
++        QTemporaryDir directory;
++        QLocalServer server;
++        server.setSocketOptions(QLocalServer::UserAccessOption);
++        QVERIFY(server.listen(directory.filePath(QStringLiteral("events.sock"))));
++        PhoneNotification notification(server.fullServerName());
++        notification.start({{QStringLiteral("application"), QStringLiteral("Test")}});
++        notification.finish(QStringLiteral("dismissed"));
++        QTRY_VERIFY(server.hasPendingConnections());
++        std::unique_ptr<QLocalSocket> peer(server.nextPendingConnection());
++        QTRY_COMPARE(peer->state(), QLocalSocket::UnconnectedState);
++        // The connect may finish synchronously. Either way, it must end at EOF;
++        // if start was sent, cancel must follow it on that same connection.
++        if (peer->canReadLine()) {
++            const QJsonObject start = QJsonDocument::fromJson(peer->readLine()).object();
++            QVERIFY(peer->canReadLine());
++            const QJsonObject cancel = QJsonDocument::fromJson(peer->readLine()).object();
++            QCOMPARE(cancel.value(QStringLiteral("request_id")), start.value(QStringLiteral("request_id")));
++            QCOMPARE(cancel.value(QStringLiteral("event")).toString(), QStringLiteral("cancel"));
++        }
++        notification.start({});
++        QCoreApplication::processEvents();
++        QVERIFY(!server.hasPendingConnections());
++    }
++
++    void notificationDestructorClosesConnection()
++    {
++        QTemporaryDir directory;
++        QLocalServer server;
++        server.setSocketOptions(QLocalServer::UserAccessOption);
++        QVERIFY(server.listen(directory.filePath(QStringLiteral("events.sock"))));
++        auto notification = std::make_unique<PhoneNotification>(server.fullServerName());
++        notification->start({});
++        QTRY_VERIFY(server.hasPendingConnections());
++        std::unique_ptr<QLocalSocket> peer(server.nextPendingConnection());
++        QTRY_VERIFY(peer->canReadLine());
++        peer->readLine();
++        notification.reset();
++        QTRY_COMPARE(peer->state(), QLocalSocket::UnconnectedState);
++    }
++
++    void notificationRejectsOversizeAndPublicSocket()
++    {
++        QTemporaryDir directory;
++        QLocalServer server;
++        server.setSocketOptions(QLocalServer::UserAccessOption);
++        QVERIFY(server.listen(directory.filePath(QStringLiteral("events.sock"))));
++        PhoneNotification oversized(server.fullServerName());
++        oversized.start({{QStringLiteral("command"), QString(64 * 1024, QLatin1Char('x'))}});
++        QCoreApplication::processEvents();
++        QVERIFY(!server.hasPendingConnections());
++        QVERIFY(QFile::setPermissions(server.fullServerName(), QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadOther));
++        PhoneNotification publicSocket(server.fullServerName());
++        publicSocket.start({});
++        QCoreApplication::processEvents();
++        QVERIFY(!server.hasPendingConnections());
++    }
++
++    void notificationIconIsBounded()
++    {
++        QImage noise(256, 256, QImage::Format_RGB32);
++        quint32 seed = 1;
++        for (int y = 0; y < noise.height(); ++y) {
++            for (int x = 0; x < noise.width(); ++x) {
++                seed = seed * 1664525 + 1013904223;
++                noise.setPixel(x, y, 0xff000000 | (seed & 0x00ffffff));
++            }
++        }
++        const QString encoded = PhoneNotification::iconPngBase64(QIcon(QPixmap::fromImage(noise)));
++        const QByteArray png = QByteArray::fromBase64(encoded.toLatin1());
++        QVERIFY(!png.isEmpty());
++        QVERIFY(png.size() <= 16 * 1024);
++        const QImage decoded = QImage::fromData(png, "PNG");
++        QVERIFY(!decoded.isNull());
++        QVERIFY(decoded.width() <= 256 && decoded.height() <= 256);
++        QVERIFY(decoded.width() < 128); // The noisy 128px PNG exceeds the budget.
++        QVERIFY(PhoneNotification::iconPngBase64(QIcon()).isEmpty());
++    }
++
++    void keyboardAndRetry()
++    {
++        TestDialog dialog({.user = "root", .authUser = "root", .command = QStringLiteral("true")});
++        dialog.show();
++        auto *password = dialog.findChild<KPasswordLineEdit *>();
++        QTRY_VERIFY(password->lineEdit()->hasFocus());
++        auto *accessible = QAccessible::queryAccessibleInterface(password->lineEdit());
++        QVERIFY(accessible);
++        QVERIFY(accessible->state().passwordEdit);
++        QVERIFY(!accessible->text(QAccessible::Name).isEmpty());
++        password->setPassword(QStringLiteral("test-only"));
++        QSignalSpy accepted(&dialog, &QDialog::accepted);
++        QTest::keyClick(password->lineEdit(), Qt::Key_Return);
++        QTRY_COMPARE(dialog.attempts, 1);
++        QCOMPARE(accepted.size(), 0);
++        QVERIFY(dialog.password().isEmpty());
++        QVERIFY(password->lineEdit()->hasFocus());
++        QVERIFY(dialog.findChild<KMessageWidget *>()->isVisible());
++        dialog.authenticated = true;
++        password->setPassword(QStringLiteral("test-only"));
++        QTest::keyClick(password->lineEdit(), Qt::Key_Return);
++        QTRY_COMPARE(accepted.size(), 1);
++        QCOMPARE(dialog.password(), QStringLiteral("test-only"));
++    }
++
++    void fatalErrorAndIgnore()
++    {
++        TestDialog dialog({.user = "root", .authUser = "root", .command = QStringLiteral("true"), .withIgnoreButton = true});
++        dialog.fatal = true;
++        dialog.show();
++        dialog.accept();
++        QTRY_COMPARE(dialog.attempts, 1);
++        auto *buttons = dialog.findChild<QDialogButtonBox *>();
++        QVERIFY(!buttons->button(QDialogButtonBox::Ok)->isEnabled());
++        QVERIFY(buttons->button(QDialogButtonBox::Cancel)->isEnabled());
++        dialog.accept();
++        QCOMPARE(dialog.attempts, 1);
++        buttons->button(QDialogButtonBox::Ignore)->click();
++        QCOMPARE(dialog.result(), int(KDEsuDialog::AsUser));
++        QCOMPARE(dialog.attempts, 1);
++    }
++
++    void hiddenRememberPassword()
++    {
++        TestDialog dialog({.user = "root", .authUser = "root", .command = QStringLiteral("true")});
++        dialog.setKeepPassword(true);
++        QVERIFY(!dialog.keepPassword());
++    }
++
++    void cancellationWinsOverQueuedAuthentication()
++    {
++        TestDialog dialog({.user = "root", .authUser = "root", .command = QStringLiteral("true")});
++        dialog.authenticated = true;
++        dialog.show();
++        dialog.accept();
++        dialog.reject();
++        QCoreApplication::processEvents();
++        QCOMPARE(dialog.attempts, 0);
++        QCOMPARE(dialog.result(), int(QDialog::Rejected));
++    }
++
++    void keyboardDetailsAndNarrowLayout()
++    {
++        TestDialog dialog({.user = "root", .authUser = "root", .command = QStringLiteral("printf '%s' 'literal text'"), .withIgnoreButton = true});
++        dialog.resize(380, 420);
++        dialog.show();
++        auto *password = dialog.findChild<KPasswordLineEdit *>()->lineEdit();
++        auto *scroll = dialog.findChild<QScrollArea *>();
++        QTRY_VERIFY(scroll->viewport()->rect().contains(QRect(password->mapTo(scroll->viewport(), QPoint()), password->size())));
++        auto *toggle = dialog.findChild<QToolButton *>(QStringLiteral("explainCommand"));
++        auto *details = dialog.findChild<QTextBrowser *>();
++        toggle->setFocus();
++        QTest::keyClick(toggle, Qt::Key_Space);
++        QVERIFY(details->isVisible());
++        QTest::keyClick(toggle, Qt::Key_Space);
++        QVERIFY(details->isHidden());
++        auto *buttons = dialog.findChild<QDialogButtonBox *>();
++        for (auto *button : buttons->buttons()) {
++            QVERIFY(dialog.rect().contains(QRect(button->mapTo(&dialog, QPoint()), button->size())));
++        }
++        QTest::keyClick(toggle, Qt::Key_Escape);
++        QCOMPARE(dialog.result(), int(QDialog::Rejected));
++        QCOMPARE(dialog.attempts, 0);
++    }
++};
++
++QTEST_MAIN(DialogTest)
++#include "dialogtest.moc"
+diff --git a/kdesu/tests/fakeauthority.cpp b/kdesu/tests/fakeauthority.cpp
+new file mode 100644
+index 00000000..58ed0b22
+--- /dev/null
++++ b/kdesu/tests/fakeauthority.cpp
+@@ -0,0 +1,86 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++// Unprivileged stdio fixture for phoneauthtest. Never installed or used by kdesu.
++#include <QCoreApplication>
++#include <QDir>
++#include <QFile>
++#include <QJsonDocument>
++#include <QJsonObject>
++#include <QSocketNotifier>
++#include <QTimer>
++
++#include <cerrno>
++#include <cstdio>
++#include <fcntl.h>
++#include <unistd.h>
++
++int main(int argc, char **argv)
++{
++    QCoreApplication app(argc, argv);
++    const QString prefix = QCoreApplication::applicationFilePath();
++    QFile commands(prefix + QStringLiteral(".commands"));
++    QFile events(prefix + QStringLiteral(".events"));
++    if (!commands.open(QIODevice::ReadOnly) || !events.open(QIODevice::WriteOnly | QIODevice::Append)) {
++        return 2;
++    }
++    QFile metadata(prefix + QStringLiteral(".started"));
++    if (!metadata.open(QIODevice::WriteOnly))
++        return 2;
++    metadata.write(QJsonDocument(QJsonObject{{QStringLiteral("argc"), argc},
++                                             {QStringLiteral("cwd"), QDir::currentPath()},
++                                             {QStringLiteral("inherited_secret"), qEnvironmentVariableIsSet("NAVIAUTH_TEST_SECRET")}})
++                       .toJson(QJsonDocument::Compact));
++    metadata.close();
++    fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK);
++    QSocketNotifier input(STDIN_FILENO, QSocketNotifier::Read);
++    QByteArray buffered;
++    QObject::connect(&input, &QSocketNotifier::activated, &app, [&] {
++        char chunk[4096];
++        ssize_t count;
++        while ((count = ::read(STDIN_FILENO, chunk, sizeof(chunk))) > 0) {
++            buffered.append(chunk, count);
++            qsizetype newline;
++            while ((newline = buffered.indexOf('\n')) >= 0) {
++                events.write(buffered.left(newline + 1));
++                events.flush();
++                buffered.remove(0, newline + 1);
++            }
++        }
++        if (count == 0) {
++            input.setEnabled(false);
++            QFile eof(prefix + QStringLiteral(".eof"));
++            if (!eof.open(QIODevice::WriteOnly)) {
++                app.exit(2);
++                return;
++            }
++            eof.close();
++            // Leave time for the test to deliver a late ready/canceled race.
++            QTimer::singleShot(500, &app, &QCoreApplication::quit);
++        }
++    });
++    QTimer output;
++    output.setInterval(10);
++    QObject::connect(&output, &QTimer::timeout, &app, [&] {
++        while (commands.peek(commands.size() - commands.pos()).contains('\n')) {
++            const QJsonObject command = QJsonDocument::fromJson(commands.readLine()).object();
++            for (const auto &channel : {"stdout", "stderr"}) {
++                if (command.contains(QLatin1String(channel))) {
++                    const QByteArray bytes = QByteArray::fromBase64(command.value(QLatin1String(channel)).toString().toLatin1());
++                    FILE *stream = channel[3] == 'o' ? stdout : stderr;
++                    fwrite(bytes.constData(), 1, size_t(bytes.size()), stream);
++                    fflush(stream);
++                }
++            }
++            if (command.contains(QStringLiteral("exit"))) {
++                app.exit(command.value(QStringLiteral("exit")).toInt());
++                return;
++            }
++        }
++    });
++    output.start();
++    QTimer::singleShot(10000, &app, &QCoreApplication::quit);
++    return app.exec();
++}
+diff --git a/kdesu/tests/phoneauthtest.cpp b/kdesu/tests/phoneauthtest.cpp
+new file mode 100644
+index 00000000..b3348222
+--- /dev/null
++++ b/kdesu/tests/phoneauthtest.cpp
+@@ -0,0 +1,581 @@
++/*
++ * SPDX-FileCopyrightText: 2026 KDE contributors
++ * SPDX-License-Identifier: Artistic-2.0
++ */
++
++#include "../phoneauthclient.h"
++#include "../sudlg.h"
++
++#include <KLocalizedString>
++#include <KMessageWidget>
++#include <KPasswordLineEdit>
++#include <QDialogButtonBox>
++#include <QDir>
++#include <QElapsedTimer>
++#include <QFile>
++#include <QJsonDocument>
++#include <QPointer>
++#include <QProcess>
++#include <QPushButton>
++#include <QSignalSpy>
++#include <QTemporaryDir>
++#include <QTest>
++#include <QTimer>
++#include <QUuid>
++
++#include <unistd.h>
++
++class TestAuthorityClient : public PhoneAuthClient
++{
++public:
++    explicit TestAuthorityClient(const QString &path)
++        : m_path(path)
++    {
++    }
++    bool checkRealHelper = false;
++    bool checksPath(const QString &path) const
++    {
++        return PhoneAuthClient::trustedHelper(path);
++    }
++
++protected:
++    QString helperPath() const override
++    {
++        return m_path;
++    }
++    bool trustedHelper(const QString &path) const override
++    {
++        return !checkRealHelper || PhoneAuthClient::trustedHelper(path);
++    }
++
++private:
++    QString m_path;
++};
++
++class TestDialog : public KDEsuDialog
++{
++public:
++    TestDialog()
++        : KDEsuDialog({.user = "root", .authUser = "root", .command = QStringLiteral("printf approved"), .withIgnoreButton = true})
++    {
++    }
++    int attempts = 0;
++
++protected:
++    bool checkPassword() override
++    {
++        ++attempts;
++        return true;
++    }
++};
++
++class FakeAuthority
++{
++public:
++    QTemporaryDir directory;
++    QFile events;
++    QFile commands;
++    QJsonObject start;
++
++    QString path() const
++    {
++        return directory.filePath(QStringLiteral("authorize"));
++    }
++    bool listen()
++    {
++        if (!directory.isValid() || !QFile::copy(QCoreApplication::applicationDirPath() + QStringLiteral("/kdesu_fake_authority"), path()))
++            return false;
++        events.setFileName(path() + QStringLiteral(".events"));
++        if (!events.open(QIODevice::WriteOnly))
++            return false;
++        events.close();
++        if (!events.open(QIODevice::ReadOnly))
++            return false;
++        commands.setFileName(path() + QStringLiteral(".commands"));
++        return commands.open(QIODevice::WriteOnly | QIODevice::Append);
++    }
++    bool acceptConnection() const
++    {
++        return QFile::exists(path() + QStringLiteral(".started"));
++    }
++    bool hasEvent()
++    {
++        return events.peek(events.size() - events.pos()).contains('\n');
++    }
++    bool sawEof() const
++    {
++        return QFile::exists(path() + QStringLiteral(".eof"));
++    }
++    bool readStart()
++    {
++        if (start.isEmpty() && hasEvent())
++            start = takeEvent();
++        return !start.isEmpty();
++    }
++    QJsonObject takeEvent()
++    {
++        return QJsonDocument::fromJson(events.readLine()).object();
++    }
++    QJsonObject reply(const QString &event) const
++    {
++        return {{QStringLiteral("protocol"), QStringLiteral("navi-auth-exec/v1")},
++                {QStringLiteral("request_id"), start.value(QStringLiteral("request_id"))},
++                {QStringLiteral("event"), event}};
++    }
++    void instruction(const QJsonObject &object)
++    {
++        commands.write(QJsonDocument(object).toJson(QJsonDocument::Compact) + '\n');
++        commands.flush();
++    }
++    void send(QJsonObject object)
++    {
++        instruction({{QStringLiteral("stdout"), QString::fromLatin1((QJsonDocument(object).toJson(QJsonDocument::Compact) + '\n').toBase64())}});
++    }
++    void raw(const QByteArray &bytes, const QString &channel = QStringLiteral("stdout"))
++    {
++        instruction({{channel, QString::fromLatin1(bytes.toBase64())}});
++    }
++    void exit(int code = 0)
++    {
++        instruction({{QStringLiteral("exit"), code}});
++    }
++};
++
++class PhoneAuthTest : public QObject
++{
++    Q_OBJECT
++private:
++    static QJsonObject context()
++    {
++        return {{QStringLiteral("source"), QStringLiteral("kdesu")},
++                {QStringLiteral("command_hidden"), false},
++                {QStringLiteral("target_user"), QStringLiteral("root")},
++                {QStringLiteral("application"), QStringLiteral("Codex")},
++                {QStringLiteral("command"), QStringLiteral("printf approved")}};
++    }
++
++private Q_SLOTS:
++    void initTestCase()
++    {
++        KLocalizedString::setApplicationDomain(QByteArrayLiteral("kdesu"));
++    }
++
++    void twoPhaseAndExactContext()
++    {
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        QSignalSpy ready(&client, &PhoneAuthClient::ready);
++        QSignalSpy executed(&client, &PhoneAuthClient::executed);
++        const QJsonObject environment{{QStringLiteral("DBUS_SESSION_BUS_ADDRESS"), QStringLiteral("unix:path=/tmp/session-bus,guid=0123456789abcdef")},
++                                      {QStringLiteral("XAUTHORITY"), QStringLiteral("/run/user/1000/xauth_test")}};
++        qputenv("NAVIAUTH_TEST_SECRET", "not-for-helper");
++        client.start(context(), environment);
++        qunsetenv("NAVIAUTH_TEST_SECRET");
++        QTRY_VERIFY(authority.acceptConnection());
++        QTRY_VERIFY(authority.readStart());
++        QFile metadata(authority.path() + QStringLiteral(".started"));
++        QVERIFY(metadata.open(QIODevice::ReadOnly));
++        const QJsonObject launch = QJsonDocument::fromJson(metadata.readAll()).object();
++        QCOMPARE(launch.value(QStringLiteral("argc")).toInt(), 1);
++        QCOMPARE(launch.value(QStringLiteral("cwd")).toString(), QStringLiteral("/"));
++        QCOMPARE(launch.value(QStringLiteral("inherited_secret")).toBool(), false);
++        QCOMPARE(authority.start.value(QStringLiteral("context")).toObject(), context());
++        QCOMPARE(authority.start.value(QStringLiteral("environment")).toObject(), environment);
++        QCOMPARE(authority.start.value(QStringLiteral("cwd")).toString(), QDir::currentPath());
++        QVERIFY(!authority.start.contains(QStringLiteral("mode")));
++        QVERIFY(!QUuid(authority.start.value(QStringLiteral("request_id")).toString()).isNull());
++        authority.send(authority.reply(QStringLiteral("ready")));
++        QTRY_COMPARE(ready.size(), 1);
++        QVERIFY(!client.committed());
++        QVERIFY(!authority.hasEvent());
++        QCOMPARE(executed.size(), 0);
++        client.commit();
++        client.commit();
++        QTRY_VERIFY(authority.hasEvent());
++        const QJsonObject commit = authority.takeEvent();
++        QCOMPARE(commit.value(QStringLiteral("event")).toString(), QStringLiteral("commit"));
++        QCOMPARE(commit.value(QStringLiteral("request_id")), authority.start.value(QStringLiteral("request_id")));
++        QCOMPARE(commit.size(), 3);
++        QVERIFY(!authority.hasEvent());
++        auto launched = authority.reply(QStringLiteral("executed"));
++        launched.insert(QStringLiteral("pid"), 1234);
++        authority.send(launched);
++        QTRY_COMPARE(executed.size(), 1);
++        QCOMPARE(executed.first().first().toLongLong(), 1234);
++        QVERIFY(client.committed());
++    }
++
++    void stderrCannotAuthorizeAndSplitReplyWorks()
++    {
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        QSignalSpy ready(&client, &PhoneAuthClient::ready);
++        client.start(context(), {});
++        QTRY_VERIFY(authority.readStart());
++        const QByteArray reply = QJsonDocument(authority.reply(QStringLiteral("ready"))).toJson(QJsonDocument::Compact) + '\n';
++        authority.raw(reply, QStringLiteral("stderr"));
++        authority.raw(reply.left(reply.size() / 2));
++        QTest::qWait(60);
++        QCOMPARE(ready.size(), 0);
++        QVERIFY(!client.committed());
++        authority.raw(reply.mid(reply.size() / 2));
++        QTRY_COMPARE(ready.size(), 1);
++        QVERIFY(!client.committed());
++    }
++
++    void exitZeroAloneCannotAuthorize()
++    {
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        QSignalSpy unavailable(&client, &PhoneAuthClient::unavailable);
++        QSignalSpy executed(&client, &PhoneAuthClient::executed);
++        client.start(context(), {});
++        QTRY_VERIFY(authority.readStart());
++        authority.exit();
++        QTRY_COMPARE(unavailable.size(), 1);
++        QCOMPARE(executed.size(), 0);
++        QVERIFY(!client.committed());
++    }
++
++    void cancellationDuringStartupSendsNoStart()
++    {
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        QSignalSpy canceled(&client, &PhoneAuthClient::canceled);
++        client.start(context(), {});
++        client.cancel();
++        QTRY_COMPARE(canceled.size(), 1);
++        QVERIFY(!authority.hasEvent());
++        QVERIFY(!client.committed());
++    }
++
++    void destructionReapsAsynchronously_data()
++    {
++        QTest::addColumn<bool>("committed");
++        QTest::newRow("before-commit") << false;
++        QTest::newRow("after-commit") << true;
++    }
++
++    void destructionReapsAsynchronously()
++    {
++        QFETCH(bool, committed);
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        auto *client = new TestAuthorityClient(authority.path());
++        QSignalSpy ready(client, &PhoneAuthClient::ready);
++        client->start(context(), {});
++        QTRY_VERIFY(authority.readStart());
++        QPointer<QProcess> process = client->findChild<QProcess *>();
++        QVERIFY(process);
++        if (committed) {
++            authority.send(authority.reply(QStringLiteral("ready")));
++            QTRY_COMPARE(ready.size(), 1);
++            client->commit();
++            QTRY_VERIFY(authority.hasEvent());
++            QCOMPARE(authority.takeEvent().value(QStringLiteral("event")).toString(), QStringLiteral("commit"));
++        }
++        QElapsedTimer elapsed;
++        elapsed.start();
++        delete client;
++        QVERIFY(elapsed.elapsed() < 250); // Fixture deliberately takes500ms to exit on EOF.
++        QVERIFY(process && process->state() != QProcess::NotRunning);
++        QTRY_VERIFY(authority.sawEof());
++        if (!committed) {
++            QVERIFY(authority.hasEvent());
++            QCOMPARE(authority.takeEvent().value(QStringLiteral("event")).toString(), QStringLiteral("cancel"));
++        }
++        QVERIFY(!authority.hasEvent());
++        QTRY_VERIFY(process.isNull());
++    }
++
++    void commitStartsSeparateCompletionDeadline()
++    {
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        QSignalSpy ready(&client, &PhoneAuthClient::ready);
++        QSignalSpy uncertain(&client, &PhoneAuthClient::uncertain);
++        client.start(context(), {});
++        QTRY_VERIFY(authority.readStart());
++        auto *deadline = client.findChild<QTimer *>(QStringLiteral("phoneAuthDeadline"));
++        QVERIFY(deadline);
++        QCOMPARE(deadline->interval(), 125000);
++        authority.send(authority.reply(QStringLiteral("ready")));
++        QTRY_COMPARE(ready.size(), 1);
++        client.commit();
++        QCOMPARE(deadline->interval(), 20000);
++        QVERIFY(deadline->isActive());
++        QTRY_VERIFY(authority.hasEvent());
++        authority.takeEvent();
++        QPointer<QProcess> process = client.findChild<QProcess *>();
++        QVERIFY(QMetaObject::invokeMethod(deadline, "timeout", Qt::DirectConnection));
++        QCOMPARE(uncertain.size(), 1);
++        QVERIFY(client.committed());
++        QVERIFY(process && process->state() != QProcess::NotRunning);
++        QTRY_VERIFY(authority.sawEof());
++        QVERIFY(!authority.hasEvent()); // No cancel after commit, even on timeout.
++        QTRY_VERIFY(process.isNull());
++    }
++
++    void rejectsUserOwnedHelper()
++    {
++        if (getuid() == 0)
++            QSKIP("This regression requires an unprivileged test process.");
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        client.checkRealHelper = true;
++        QSignalSpy unavailable(&client, &PhoneAuthClient::unavailable);
++        client.start(context(), {});
++        QCOMPARE(unavailable.size(), 1);
++        QCoreApplication::processEvents();
++        QVERIFY(!authority.acceptConnection());
++    }
++
++    void failedToStartCannotAuthorize()
++    {
++        TestAuthorityClient client(QStringLiteral("/nonexistent/navi-auth-test-helper"));
++        QSignalSpy unavailable(&client, &PhoneAuthClient::unavailable);
++        client.start(context(), {});
++        QTRY_COMPARE(unavailable.size(), 1);
++        QVERIFY(!client.committed());
++        QVERIFY(!client.pending());
++    }
++
++    void destructionDuringFailedStartupReapsProcess()
++    {
++        auto *client = new TestAuthorityClient(QStringLiteral("/nonexistent/navi-auth-test-helper"));
++        client->start(context(), {});
++        QPointer<QProcess> process = client->findChild<QProcess *>();
++        delete client;
++        QTRY_VERIFY(process.isNull());
++    }
++
++    void rejectsMissingNonSetuidAndSymlinkHelpers()
++    {
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        QVERIFY(!client.checksPath(QStringLiteral("/nonexistent/navi-auth-test-helper")));
++        QVERIFY(!client.checksPath(QStringLiteral("/usr/bin/true")));
++        const QString link = authority.directory.filePath(QStringLiteral("linked"));
++        QVERIFY(QFile::link(authority.path(), link));
++        QVERIFY(!client.checksPath(link));
++    }
++
++    void refusesPreviewHiddenAndOversized_data()
++    {
++        QTest::addColumn<QString>("kind");
++        for (const auto &kind : {"preview", "hidden", "target", "oversized"})
++            QTest::newRow(kind) << QString::fromLatin1(kind);
++    }
++
++    void refusesPreviewHiddenAndOversized()
++    {
++        QFETCH(QString, kind);
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        QSignalSpy unavailable(&client, &PhoneAuthClient::unavailable);
++        auto request = context();
++        if (kind == QLatin1String("preview"))
++            request.insert(QStringLiteral("source"), QStringLiteral("kdesu-preview"));
++        if (kind == QLatin1String("hidden"))
++            request.insert(QStringLiteral("command_hidden"), true);
++        if (kind == QLatin1String("target"))
++            request.insert(QStringLiteral("target_user"), QStringLiteral("another-user"));
++        if (kind == QLatin1String("oversized"))
++            request.insert(QStringLiteral("command"), QString(65536, QLatin1Char('x')));
++        client.start(request, {});
++        QCOMPARE(unavailable.size(), 1);
++        QCoreApplication::processEvents();
++        QVERIFY(!authority.acceptConnection());
++    }
++
++    void phoneWinsWithoutPasswordOrIgnore()
++    {
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        TestDialog dialog;
++        dialog.setPhoneAuthentication(&client, {});
++        QSignalSpy accepted(&dialog, &QDialog::accepted);
++        dialog.show();
++        QTRY_VERIFY(authority.acceptConnection());
++        QTRY_VERIFY(authority.readStart());
++        dialog.findChild<KPasswordLineEdit *>()->setPassword(QStringLiteral("test-only"));
++        authority.send(authority.reply(QStringLiteral("ready")));
++        QTRY_VERIFY(authority.hasEvent());
++        QCOMPARE(authority.takeEvent().value(QStringLiteral("event")).toString(), QStringLiteral("commit"));
++        QVERIFY(client.committed());
++        dialog.accept();
++        auto *buttons = dialog.findChild<QDialogButtonBox *>();
++        buttons->button(QDialogButtonBox::Ignore)->click();
++        QVERIFY(!buttons->button(QDialogButtonBox::Ok)->isEnabled());
++        QVERIFY(!buttons->button(QDialogButtonBox::Ignore)->isEnabled());
++        QCOMPARE(dialog.attempts, 0);
++        auto launched = authority.reply(QStringLiteral("executed"));
++        launched.insert(QStringLiteral("pid"), 4321);
++        authority.send(launched);
++        authority.exit();
++        QTRY_COMPARE(dialog.result(), int(KDEsuDialog::PhoneExecuted));
++        QCOMPARE(accepted.size(), 0); // Distinct outcome, never the password result.
++        QCOMPARE(dialog.attempts, 0);
++        QVERIFY(dialog.password().isEmpty());
++    }
++
++    void fallbackCancelsBeforeProceeding_data()
++    {
++        QTest::addColumn<bool>("ignore");
++        QTest::addColumn<bool>("eof");
++        QTest::newRow("password-canceled") << false << false;
++        QTest::newRow("ignore-canceled") << true << false;
++        QTest::newRow("password-precommit-eof") << false << true;
++        QTest::newRow("ignore-precommit-eof") << true << true;
++    }
++
++    void fallbackCancelsBeforeProceeding()
++    {
++        QFETCH(bool, ignore);
++        QFETCH(bool, eof);
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        TestDialog dialog;
++        dialog.setPhoneAuthentication(&client, {});
++        dialog.show();
++        QTRY_VERIFY(authority.acceptConnection());
++        QTRY_VERIFY(authority.readStart());
++        if (ignore)
++            dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ignore)->click();
++        else
++            dialog.accept();
++        QTRY_VERIFY(authority.hasEvent());
++        const QJsonObject cancel = authority.takeEvent();
++        QCOMPARE(cancel.value(QStringLiteral("event")).toString(), QStringLiteral("cancel"));
++        QCOMPARE(cancel.value(QStringLiteral("request_id")), authority.start.value(QStringLiteral("request_id")));
++        QCOMPARE(dialog.attempts, 0);
++        QVERIFY(dialog.isVisible());
++        // Approval can race with cancellation, but cannot commit after fallback won.
++        authority.send(authority.reply(QStringLiteral("ready")));
++        if (eof)
++            authority.exit();
++        else
++            authority.send(authority.reply(QStringLiteral("canceled")));
++        QTRY_COMPARE(dialog.result(), ignore ? int(KDEsuDialog::AsUser) : int(QDialog::Accepted));
++        QCOMPARE(dialog.attempts, ignore ? 0 : 1);
++        QVERIFY(!client.committed());
++        QVERIFY(!authority.hasEvent());
++    }
++
++    void postCommitFailuresNeverFallBack_data()
++    {
++        QTest::addColumn<QString>("failure");
++        for (const auto &failure : {"eof", "error", "wrong-id", "wrong-protocol", "invalid-pid", "canceled", "oversized", "malformed"})
++            QTest::newRow(failure) << QString::fromLatin1(failure);
++    }
++
++    void postCommitFailuresNeverFallBack()
++    {
++        QFETCH(QString, failure);
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        TestDialog dialog;
++        dialog.setPhoneAuthentication(&client, {});
++        QSignalSpy uncertain(&client, &PhoneAuthClient::uncertain);
++        dialog.show();
++        QTRY_VERIFY(authority.acceptConnection());
++        QTRY_VERIFY(authority.readStart());
++        authority.send(authority.reply(QStringLiteral("ready")));
++        QTRY_VERIFY(authority.hasEvent());
++        QCOMPARE(authority.takeEvent().value(QStringLiteral("event")).toString(), QStringLiteral("commit"));
++        auto response = authority.reply(QStringLiteral("executed"));
++        response.insert(QStringLiteral("pid"), 1234);
++        if (failure == QLatin1String("eof"))
++            authority.exit();
++        else if (failure == QLatin1String("oversized")) {
++            authority.raw(QByteArray(16385, 'x'));
++        } else if (failure == QLatin1String("malformed")) {
++            authority.raw("not JSON\n");
++        } else {
++            if (failure == QLatin1String("error")) {
++                response.insert(QStringLiteral("event"), QStringLiteral("error"));
++                response.insert(QStringLiteral("message"), QStringLiteral("Launch uncertain"));
++            }
++            if (failure == QLatin1String("wrong-id"))
++                response.insert(QStringLiteral("request_id"), QUuid::createUuid().toString(QUuid::WithoutBraces));
++            if (failure == QLatin1String("wrong-protocol"))
++                response.insert(QStringLiteral("protocol"), QStringLiteral("navi-auth-desktop/v1"));
++            if (failure == QLatin1String("invalid-pid"))
++                response.insert(QStringLiteral("pid"), 1.5);
++            if (failure == QLatin1String("canceled"))
++                response.insert(QStringLiteral("event"), QStringLiteral("canceled"));
++            authority.send(response);
++        }
++        QTRY_COMPARE(uncertain.size(), 1);
++        QVERIFY(client.committed());
++        dialog.accept();
++        auto *buttons = dialog.findChild<QDialogButtonBox *>();
++        buttons->button(QDialogButtonBox::Ignore)->click();
++        QCOMPARE(dialog.attempts, 0);
++        QCOMPARE(dialog.result(), int(QDialog::Rejected));
++        QVERIFY(dialog.isVisible());
++        QVERIFY(dialog.findChild<KMessageWidget *>()->isVisible());
++        QVERIFY(buttons->button(QDialogButtonBox::Cancel)->isEnabled());
++        QVERIFY(!buttons->button(QDialogButtonBox::Ok)->isEnabled());
++        QVERIFY(!buttons->button(QDialogButtonBox::Ignore)->isEnabled());
++    }
++
++    void executedBeforeCommitCannotAuthorize()
++    {
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        TestDialog dialog;
++        dialog.setPhoneAuthentication(&client, {});
++        QSignalSpy unavailable(&client, &PhoneAuthClient::unavailable);
++        dialog.show();
++        QTRY_VERIFY(authority.acceptConnection());
++        QTRY_VERIFY(authority.readStart());
++        auto premature = authority.reply(QStringLiteral("executed"));
++        premature.insert(QStringLiteral("pid"), 1234);
++        authority.send(premature);
++        QTRY_COMPARE(unavailable.size(), 1);
++        QVERIFY(!client.committed());
++        QCOMPARE(dialog.result(), int(QDialog::Rejected));
++        QCOMPARE(dialog.attempts, 0);
++        dialog.accept();
++        QTRY_COMPARE(dialog.attempts, 1);
++        QCOMPARE(dialog.result(), int(QDialog::Accepted));
++    }
++
++    void dismissalIgnoresLateReady()
++    {
++        FakeAuthority authority;
++        QVERIFY(authority.listen());
++        TestAuthorityClient client(authority.path());
++        TestDialog dialog;
++        dialog.setPhoneAuthentication(&client, {});
++        dialog.show();
++        QTRY_VERIFY(authority.acceptConnection());
++        QTRY_VERIFY(authority.readStart());
++        dialog.reject();
++        QTRY_VERIFY(authority.hasEvent());
++        QCOMPARE(authority.takeEvent().value(QStringLiteral("event")).toString(), QStringLiteral("cancel"));
++        authority.send(authority.reply(QStringLiteral("ready")));
++        authority.send(authority.reply(QStringLiteral("canceled")));
++        QTRY_VERIFY(!client.pending());
++        QVERIFY(!client.committed());
++        QCOMPARE(dialog.result(), int(QDialog::Rejected));
++        QCOMPARE(dialog.attempts, 0);
++        QVERIFY(!authority.hasEvent());
++    }
++};
++
++QTEST_MAIN(PhoneAuthTest)
++#include "phoneauthtest.moc"

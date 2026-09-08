@@ -1,0 +1,14 @@
+<resources>
+    <!-- Navi's crystal palette with pink/cyan accents. -->
+    <color name="navi_background">#160021</color>
+    <color name="navi_surface">#26122F</color>
+    <color name="navi_machine_surface">#30163C</color>
+    <color name="navi_field">#130B1C</color>
+    <color name="navi_border">#593264</color>
+    <color name="navi_text">#FDF4FF</color>
+    <color name="navi_secondary">#C7AFD4</color>
+    <color name="navi_muted">#AE91BB</color>
+    <color name="navi_pink">#F072D7</color>
+    <color name="navi_cyan">#00D9FF</color>
+    <color name="navi_lilac">#C084FC</color>
+</resources>

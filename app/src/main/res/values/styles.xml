@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">@color/navi_pink</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">@color/navi_background</item>
+        <item name="android:navigationBarColor">@color/navi_background</item>
+        <item name="android:windowBackground">@color/navi_background</item>
+        <item name="android:colorControlHighlight">#33F072D7</item>
+    </style>
+    <style name="SetupHeading">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textSize">26sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textColor">@color/navi_text</item>
+    </style>
+    <style name="SetupBody">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">12dp</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textColor">@color/navi_secondary</item>
+        <item name="android:lineSpacingExtra">4dp</item>
+    </style>
+    <style name="SetupStep" parent="SetupHeading">
+        <item name="android:textSize">20sp</item>
+        <item name="android:layout_marginTop">28dp</item>
+    </style>
+    <style name="SetupStatus" parent="SetupBody">
+        <item name="android:textColor">@color/navi_cyan</item>
+        <item name="android:accessibilityLiveRegion">polite</item>
+    </style>
+    <style name="SetupButton" parent="android:style/Widget.Material.Button.Borderless">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:layout_marginTop">8dp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textColor">@color/navi_cyan</item>
+    </style>
+</resources>

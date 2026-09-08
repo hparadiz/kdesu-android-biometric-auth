@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="@color/navi_background" android:fillViewport="true">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:padding="24dp">
+        <TextView style="@style/SetupHeading" android:text="Keep Navi available" />
+        <TextView style="@style/SetupBody"
+            android:text="Receive authentication requests while using other apps or with the screen locked. Navi keeps a quiet computer-connection notification while its listener runs. Each approval still needs your fingerprint." />
+
+        <TextView style="@style/SetupStep" android:text="1 · Allow notifications" />
+        <TextView android:id="@+id/background_notification_status" style="@style/SetupStatus" />
+        <TextView style="@style/SetupBody"
+            android:text="Allow notifications for Navi. Keep Computer connection enabled for the persistent service notification; it can stay Silent. Set Authentication requests to Alerting, with sound or vibration and Pop on screen if offered." />
+        <Button android:id="@+id/background_notifications" style="@style/SetupButton" android:text="Allow / manage notifications" />
+        <Button android:id="@+id/background_connection_channel" style="@style/SetupButton" android:text="Computer connection notification" />
+        <Button android:id="@+id/background_request_channel" style="@style/SetupButton" android:text="Authentication request alerts" />
+
+        <TextView style="@style/SetupStep" android:text="2 · Allow background operation" />
+        <TextView android:id="@+id/background_battery_status" style="@style/SetupStatus" />
+        <TextView style="@style/SetupBody"
+            android:text="Tap below and choose Allow in Android’s battery-optimization prompt. The listener needs network access during sleep to deliver requests promptly. This can use more battery. Navi waits for incoming connections; it does not hold the screen on." />
+        <Button android:id="@+id/background_battery" style="@style/SetupButton" android:text="Allow background operation" />
+        <TextView style="@style/SetupBody"
+            android:text="On Pixel, also check App battery usage: allow background usage and choose Unrestricted if offered. Turn off Pause app activity if unused (or Manage app if unused). Other phones may have an Auto-start permission or Sleeping apps list: allow Navi to auto-start and exclude it from sleeping apps. These names vary by Android version." />
+        <Button android:id="@+id/background_app_settings" style="@style/SetupButton" android:text="Open Navi’s Android app settings" />
+
+        <TextView style="@style/SetupStep" android:text="3 · Enable the connection once" />
+        <TextView android:id="@+id/background_service_status" style="@style/SetupStatus" />
+        <TextView style="@style/SetupBody"
+            android:text="Return to Navi and tap Enable network authentication. Approve the one-time fingerprint prompt if requested. Wait for Ready on your network. Your paired computer can then send requests over the same reachable Wi-Fi/LAN. You can press Home, swipe away the app’s recent task, and lock the screen." />
+        <TextView style="@style/SetupBody"
+            android:text="Navi remembers your choice and restarts after an app update or after reboot and the first phone unlock. Keep Wi-Fi connected. Opening Navi also resumes an enabled listener. Turn off network authentication in Navi to stop it and disable automatic restart." />
+
+        <TextView style="@style/SetupStep" android:text="Long-term checks" />
+        <TextView style="@style/SetupBody"
+            android:text="Check for Navi · computer authentication in the notification shade. Android 14 and newer may let you swipe away even an ongoing notification; that does not stop the listener. Reopen Navi to restore its notification. If you use Force stop or Android’s Active apps → Stop control, open Navi again to resume." />
+        <TextView style="@style/SetupBody"
+            android:text="Reserve the phone’s IP in your router if your computer uses a fixed address. Guest Wi-Fi or client isolation can block direct connections. After setup, test once with the screen locked and again after reboot and first unlock. Battery Saver, vendor restrictions, or a lost connection can still delay delivery; no app can promise uninterrupted availability." />
+        <Button android:id="@+id/background_done" style="@style/SetupButton" android:text="Return to Navi" />
+    </LinearLayout>
+</ScrollView>

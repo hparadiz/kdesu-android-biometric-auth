@@ -1,0 +1,20 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'in.akuj.fingerprint'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'in.akuj.fingerprint'
+        minSdk 30
+        targetSdk 34
+        versionCode 10
+        versionName '0.8.1'
+    }
+    buildTypes {
+        release { debuggable false }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}

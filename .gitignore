@@ -1,0 +1,22 @@
+# Authentication identities, pairings, receipts and signing credentials
+.state/
+*.keystore
+*.jks
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite3*
+.env
+.env.*
+# Local SDK/build products
+build/
+app/build/
+.gradle/
+.idea/
+local.properties
+__pycache__/
+*.pyc
+*.apk
+*.aab
+*.log

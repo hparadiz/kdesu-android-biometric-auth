@@ -1,0 +1,57 @@
+# Gentoo split patch by Andreas Sturmlechner, refreshed against KDE6.7.2 without changing its build-only-kdesu semantics.
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -30,7 +30,7 @@
+ 
+ include(KDEGitCommitHooks)
+ 
+-find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS
++find_package(Qt6 ${QT_MIN_VERSION} CONFIG COMPONENTS
+     Widgets
+     Svg
+     DBus
+@@ -50,7 +50,7 @@
+     find_package(Qt6GuiPrivate ${REQUIRED_QT_VERSION} REQUIRED NO_MODULE)
+ endif()
+ 
+-find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS
++find_package(KF6 ${KF6_MIN_VERSION} COMPONENTS
+     Config
+     IconThemes
+     I18n
+@@ -91,23 +91,23 @@
+     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${executable_target}5 DESTINATION ${KDE_INSTALL_FULL_BINDIR})
+ endfunction()
+ 
+-add_subdirectory(keditfiletype)
+-add_subdirectory(kmimetypefinder)
+-add_subdirectory(kioclient)
+-add_subdirectory(ksvgtopng)
+-add_subdirectory(kdeinhibit)
+-add_subdirectory(plasma-open-settings)
+-add_subdirectory(kinfo)
+-add_subdirectory(kstart)
++#add_subdirectory(keditfiletype)
++#add_subdirectory(kmimetypefinder)
++#add_subdirectory(kioclient)
++#add_subdirectory(ksvgtopng)
++#add_subdirectory(kdeinhibit)
++#add_subdirectory(plasma-open-settings)
++#add_subdirectory(kinfo)
++#add_subdirectory(kstart)
+ 
+ if(KF6Su_FOUND AND KF6WidgetsAddons_FOUND)
+     add_subdirectory(kdesu)
+ endif()
+ 
+-if(UNIX)
+-    add_subdirectory(kdeeject)
+-    add_subdirectory(kbroadcastnotification)
+-endif()
++#if(UNIX)
++#    add_subdirectory(kdeeject)
++#    add_subdirectory(kbroadcastnotification)
++#endif()
+ 
+ check_include_files(sys/wait.h HAVE_SYS_WAIT_H)
+ 
