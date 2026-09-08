@@ -5,6 +5,10 @@ requested command and requires a fresh strong biometric before signing it with
 an Android Keystore key. A protected desktop helper verifies that signature and
 executes the approved command.
 
+![kdesu on the desktop beside the corresponding Android biometric approval request](docs/images/kdesu-android-approval.png)
+
+*Desktop command review (left) and the corresponding phone approval screen (right).*
+
 The standalone **Navi Authenticator** app can receive requests directly over local
 Wi-Fi. That transport needs no KDE Connect, ADB, desktop notification daemon,
 cloud account or Internet push service during normal authentication. kdesu itself
