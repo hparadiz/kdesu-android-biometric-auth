@@ -25,8 +25,8 @@ part of the security boundary.
 | Component | Version / purpose |
 | --- | --- |
 | Android application | 0.8.2, API 30+, non-debuggable release mode |
-| Host CLI and native/Python authority | Deployed 0.7.0 implementation |
-| KDE patch and Gentoo packages | kdesu-gui 6.7.2-r2 against kde-cli-tools 6.7.2 |
+| Host CLI and native/Python authority | 0.7.1 with dynamic LAN discovery |
+| KDE patch and Gentoo packages | kdesu-gui 6.7.2-r3 against kde-cli-tools 6.7.2 |
 | Direct Wi-Fi transport | Pinned TLS 1.3 to the phone on TCP 39841 |
 | Optional KDE Connect transport | Existing file sharing, or paired-device IP lookup |
 | Android CI | Builds debug and release modes with a disposable signing key |
@@ -52,7 +52,7 @@ not implemented. Installing this does not reroute those authentication systems.
 After enrollment, a terminal can trigger a fresh approval:
 
 ```sh
-python3 host.py authenticate --endpoint PHONE_IP:39841 \
+python3 host.py authenticate --kdeconnect-device PAIRED_DEVICE_ID \
   --application Terminal --operation 'Verify phone approval'
 ```
 

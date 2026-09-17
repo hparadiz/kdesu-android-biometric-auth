@@ -1,0 +1,189 @@
+--- a/kdesu/sudlg.cpp
++++ b/kdesu/sudlg.cpp
+@@ -264,7 +264,15 @@
+     m_phoneStatus->setObjectName(QStringLiteral("phoneStatus"));
+     m_phoneStatus->setAccessibleName(i18n("Phone authentication status"));
+     m_phoneStatus->hide();
+-    layout->addWidget(m_phoneStatus);
++    auto *phoneStatusRow = new QHBoxLayout;
++    phoneStatusRow->addWidget(m_phoneStatus, 1);
++    m_phoneRetry = new QPushButton(QIcon::fromTheme(QStringLiteral("view-refresh")), i18n("&Retry"), body);
++    m_phoneRetry->setObjectName(QStringLiteral("phoneRetryButton"));
++    m_phoneRetry->setAccessibleDescription(i18n("Try connecting to your phone again."));
++    m_phoneRetry->setAutoDefault(false);
++    m_phoneRetry->hide();
++    phoneStatusRow->addWidget(m_phoneRetry, 0, Qt::AlignVCenter);
++    layout->addLayout(phoneStatusRow);
+ 
+     auto *account = new QFrame(body);
+     account->setObjectName(QStringLiteral("accountCard"));
+@@ -395,6 +403,13 @@
+ {
+     Q_ASSERT(!m_notificationStarted && !m_phoneAuth);
+     m_phoneAuth = client;
++    connect(m_phoneRetry, &QPushButton::clicked, this, [this, environment] {
++        if (!m_phoneAuth || m_cancelled || m_authenticating || m_fatalError || m_phoneCommitted || m_phoneFallback != PhoneFallback::None || m_phoneAuth->pending()) {
++            return;
++        }
++        setPhoneStatus(i18n("Connecting to your phone…"));
++        m_phoneAuth->start(m_notificationContext, environment);
++    });
+     connect(this, &KDEsuDialog::notificationRequested, client, [client, environment](const QJsonObject &context) {
+         client->start(context, environment);
+     });
+@@ -429,6 +444,7 @@
+     connect(client, &PhoneAuthClient::unavailable, this, [this](const QString &message) {
+         if (!m_cancelled) {
+             setPhoneStatus(i18n("%1 You can use your password.", message));
++            m_phoneRetry->setVisible(m_phoneFallback == PhoneFallback::None && !m_phoneCommitted && !m_fatalError);
+             finishPhoneFallback();
+         }
+     });
+@@ -445,6 +461,7 @@
+ void KDEsuDialog::setPhoneStatus(const QString &message)
+ {
+     m_phoneStatus->setText(message);
++    m_phoneRetry->hide();
+     m_phoneStatus->show();
+     QAccessibleEvent event(m_phoneStatus, QAccessible::Alert);
+     QAccessible::updateAccessibility(&event);
+@@ -457,6 +474,7 @@
+         button->setEnabled(!busy || m_buttons->standardButton(button) == QDialogButtonBox::Cancel);
+     }
+     m_password->setEnabled(!busy);
++    m_phoneRetry->setEnabled(!busy);
+ }
+ 
+ void KDEsuDialog::finishPhoneFallback()
+@@ -612,6 +630,7 @@
+         return;
+     }
+     m_authenticating = true;
++    m_phoneRetry->setEnabled(false);
+     m_error->hide();
+     m_buttons->setEnabled(false);
+     m_password->setEnabled(false);
+@@ -623,6 +642,7 @@
+         m_authenticating = false;
+         m_buttons->setEnabled(true);
+         m_password->setEnabled(!m_fatalError);
++        m_phoneRetry->setEnabled(!m_fatalError);
+         m_buttons->button(QDialogButtonBox::Ok)->setEnabled(!m_fatalError);
+         if (authenticated) {
+             QDialog::accept();
+--- a/kdesu/sudlg.h
++++ b/kdesu/sudlg.h
+@@ -16,6 +16,7 @@
+ class QDialogButtonBox;
+ class QScrollArea;
+ class QLabel;
++class QPushButton;
+ class PhoneAuthClient;
+ class QVBoxLayout;
+ 
+@@ -86,6 +87,7 @@
+     bool m_notificationFinished = false;
+     QPointer<PhoneAuthClient> m_phoneAuth;
+     QLabel *m_phoneStatus;
++    QPushButton *m_phoneRetry;
+     enum class PhoneFallback {
+         None,
+         Password,
+--- a/kdesu/phoneauthclient.cpp
++++ b/kdesu/phoneauthclient.cpp
+@@ -147,6 +147,16 @@
+ 
+ void PhoneAuthClient::start(const QJsonObject &context, const QJsonObject &environment)
+ {
++    if (m_state == State::Finished && !m_committed) {
++        m_state = State::Idle;
++        m_requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
++        m_failure.clear();
++        m_startSent = false;
++        m_ready = false;
++        m_cancelRequested = false;
++        m_withdrawing = false;
++        m_terminationAttempted = false;
++    }
+     if (m_state != State::Idle) {
+         return;
+     }
+--- a/kdesu/tests/phoneauthtest.cpp
++++ b/kdesu/tests/phoneauthtest.cpp
+@@ -14,6 +14,7 @@
+ #include <QElapsedTimer>
+ #include <QFile>
+ #include <QJsonDocument>
++#include <QLabel>
+ #include <QPointer>
+ #include <QProcess>
+ #include <QPushButton>
+@@ -33,6 +34,10 @@
+     {
+     }
+     bool checkRealHelper = false;
++    void setPath(const QString &path)
++    {
++        m_path = path;
++    }
+     bool checksPath(const QString &path) const
+     {
+         return PhoneAuthClient::trustedHelper(path);
+@@ -394,6 +399,45 @@
+         QCOMPARE(unavailable.size(), 1);
+         QCoreApplication::processEvents();
+         QVERIFY(!authority.acceptConnection());
++    }
++
++    void retryAfterConnectionFailure()
++    {
++        FakeAuthority first;
++        FakeAuthority second;
++        QVERIFY(first.listen());
++        QVERIFY(second.listen());
++        TestAuthorityClient client(first.path());
++        TestDialog dialog;
++        dialog.setPhoneAuthentication(&client, {});
++        dialog.show();
++        auto *retry = dialog.findChild<QPushButton *>(QStringLiteral("phoneRetryButton"));
++        auto *status = dialog.findChild<QLabel *>(QStringLiteral("phoneStatus"));
++        QVERIFY(retry);
++        QVERIFY(!retry->isVisible());
++        QTRY_VERIFY(first.readStart());
++        auto error = first.reply(QStringLiteral("error"));
++        error.insert(QStringLiteral("message"), QStringLiteral("No route to host"));
++        first.send(error);
++        QTRY_VERIFY(retry->isVisible());
++        QTRY_VERIFY(retry->geometry().left() > status->geometry().right());
++        QVERIFY(!client.pending());
++        client.setPath(second.path());
++        retry->click();
++        retry->click(); // A second activation cannot start a concurrent request.
++        QTRY_VERIFY(second.readStart());
++        QVERIFY(!retry->isVisible());
++        QVERIFY(first.start.value(QStringLiteral("request_id")) != second.start.value(QStringLiteral("request_id")));
++        QCOMPARE(first.start.value(QStringLiteral("context")), second.start.value(QStringLiteral("context")));
++        second.send(second.reply(QStringLiteral("ready")));
++        QTRY_VERIFY(second.hasEvent());
++        QCOMPARE(second.takeEvent().value(QStringLiteral("event")).toString(), QStringLiteral("commit"));
++        auto launched = second.reply(QStringLiteral("executed"));
++        launched.insert(QStringLiteral("pid"), 4321);
++        second.send(launched);
++        second.exit();
++        QTRY_COMPARE(dialog.result(), int(KDEsuDialog::PhoneExecuted));
++        QCOMPARE(dialog.attempts, 0);
+     }
+ 
+     void phoneWinsWithoutPasswordOrIgnore()
+@@ -529,6 +573,11 @@
+         QVERIFY(buttons->button(QDialogButtonBox::Cancel)->isEnabled());
+         QVERIFY(!buttons->button(QDialogButtonBox::Ok)->isEnabled());
+         QVERIFY(!buttons->button(QDialogButtonBox::Ignore)->isEnabled());
++        auto *retry = dialog.findChild<QPushButton *>(QStringLiteral("phoneRetryButton"));
++        QVERIFY(!retry->isVisible());
++        retry->click();
++        client.start(context(), {});
++        QVERIFY(!client.pending());
+     }
+ 
+     void executedBeforeCommitCannotAuthorize()

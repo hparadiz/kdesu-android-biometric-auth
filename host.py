@@ -176,7 +176,17 @@ class NetworkPhone:
     any RPC, verify its biometric signature and exact match to the live TLS peer.
     The encrypted RPC is separately machine-signed and bound to a server nonce.
     """
-    def __init__(self, endpoint, machine_key, root, leaf):
+    def __init__(self, endpoint, machine_key, root, leaf, resolve_endpoint=None):
+        self.resolve_endpoint = resolve_endpoint
+        self.refreshed = False
+        self._set_endpoint(endpoint if endpoint is not None else resolve_endpoint())
+        validate_certificate(leaf, root)
+        self.key, self.root, self.leaf = machine_key, root, leaf
+        self.machine_id = digest(spki(root.public_key()))
+        self.phone_id = digest(spki(leaf.public_key()))
+        self.request_id = None
+
+    def _set_endpoint(self, endpoint):
         import ipaddress
         host, separator, port = endpoint.rpartition(":")
         if not separator or not host or not port.isdecimal() or not 1 <= int(port) <= 65535:
@@ -184,12 +194,7 @@ class NetworkPhone:
         address = ipaddress.ip_address(host.strip("[]"))
         if not address.is_private or address.is_loopback or address.is_unspecified or address.is_multicast:
             raise ValueError("Phone endpoint must be a private LAN address")
-        validate_certificate(leaf, root)
         self.address = (str(address), int(port))
-        self.key, self.root, self.leaf = machine_key, root, leaf
-        self.machine_id = digest(spki(root.public_key()))
-        self.phone_id = digest(spki(leaf.public_key()))
-        self.request_id = None
 
     @staticmethod
     def _read(stream):
@@ -202,6 +207,21 @@ class NetworkPhone:
         return value
 
     def _connect(self):
+        deadline = time.monotonic() + 15
+        try:
+            return self._connect_once(deadline)
+        except OSError:
+            if self.resolve_endpoint is None or self.refreshed:
+                raise
+            # Retry only connection establishment, before any RPC was sent.
+            # One discovery refresh per request; keep the original time bound.
+            self.refreshed = True
+            self._set_endpoint(self.resolve_endpoint(refresh=True,
+                previous=f"{self.address[0]}:{self.address[1]}",
+                timeout=min(5, max(0, deadline - time.monotonic()))))
+            return self._connect_once(deadline)
+
+    def _connect_once(self, deadline):
         # Custom trust: the known biometric key certifies the transport key.
         # CERT_NONE suppresses Web PKI validation only; no RPC is sent until our
         # mandatory pinned-key verification below succeeds on this same socket.
@@ -209,7 +229,10 @@ class NetworkPhone:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         context.minimum_version = ssl.TLSVersion.TLSv1_3
-        raw_socket = socket.create_connection(self.address, timeout=5)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Phone connection timed out after network discovery")
+        raw_socket = socket.create_connection(self.address, timeout=min(5, remaining))
         connection = None
         stream = None
         sockets = [raw_socket]
@@ -218,7 +241,7 @@ class NetworkPhone:
                 sockets[0].shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-        watchdog = threading.Timer(10, expire)
+        watchdog = threading.Timer(max(0, min(10, deadline - time.monotonic())), expire)
         watchdog.daemon = True
         watchdog.start()
         try:
@@ -294,7 +317,7 @@ class NetworkPhone:
         pass  # The phone validates and posts/withdraws its notification on delivery.
 
 
-def kdeconnect_endpoint(device_id, environment=None, account=None):
+def kdeconnect_endpoint(device_id, environment=None, account=None, *, refresh=False, previous=None, timeout=5):
     """Use the desktop's paired KDE Connect device only as a live address book."""
     import ipaddress
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", device_id):
@@ -305,23 +328,48 @@ def kdeconnect_endpoint(device_id, environment=None, account=None):
                        env={"PATH": "/usr/bin:/bin", "HOME": account.pw_dir,
                             "DBUS_SESSION_BUS_ADDRESS": environment.get("DBUS_SESSION_BUS_ADDRESS", ""),
                             "XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"})
-    def property_value(name):
-        result = subprocess.run(["/usr/bin/qdbus6", "org.kde.kdeconnect", "/modules/kdeconnect/devices/" + device_id,
-            "org.freedesktop.DBus.Properties.Get", "org.kde.kdeconnect.device", name],
-            capture_output=True, timeout=5, check=True, **options)
+    deadline = time.monotonic() + timeout
+    def call(path, *arguments):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Phone network discovery timed out")
+        result = subprocess.run(["/usr/bin/qdbus6", "org.kde.kdeconnect", path, *arguments],
+            capture_output=True, timeout=remaining, check=True, **options)
         if len(result.stdout) > 4096:
             raise ValueError("Oversized KDE Connect reply")
         return result.stdout.decode().strip()
-    if property_value("isPaired") != "true" or property_value("isReachable") != "true":
-        raise ValueError("The paired Pixel is not reachable in KDE Connect")
-    for candidate in property_value("reachableAddresses").splitlines():
-        try:
-            address = ipaddress.ip_address(candidate.strip())
-        except ValueError:
-            continue
-        if address.version == 4 and address.is_private and not address.is_loopback and not address.is_unspecified:
-            return f"{address}:39841"
-    raise ValueError("KDE Connect has no private IPv4 LAN address for the phone")
+    def property_value(name):
+        return call("/modules/kdeconnect/devices/" + device_id,
+            "org.freedesktop.DBus.Properties.Get", "org.kde.kdeconnect.device", name)
+    if property_value("isPaired") != "true":
+        raise ValueError("The phone is not paired in KDE Connect")
+    def current_endpoint():
+        if property_value("isReachable") == "true":
+            for candidate in property_value("reachableAddresses").splitlines():
+                try:
+                    address = ipaddress.ip_address(candidate.strip())
+                except ValueError:
+                    continue
+                if address.version == 4 and address.is_private and not address.is_loopback and not address.is_unspecified and not address.is_multicast:
+                    return f"{address}:39841"
+        return None
+    if not refresh:
+        endpoint = current_endpoint()
+        if endpoint:
+            return endpoint
+    # Reuse KDE Connect's UDP/mDNS discovery once, then inspect local state.
+    call("/modules/kdeconnect", "org.kde.kdeconnect.daemon.forceOnNetworkChange")
+    endpoint = None
+    for delay in (0, 0.25, 0.5, 1, 2):
+        if deadline - time.monotonic() <= delay:
+            break
+        time.sleep(delay)
+        endpoint = current_endpoint()
+        if endpoint and endpoint != previous:
+            return endpoint
+    if endpoint:
+        return endpoint
+    raise ConnectionError("Phone not found after KDE Connect network discovery")
 
 
 def envelope(key, payload):
@@ -374,8 +422,8 @@ def approve(args, db, machine_key, root):
         if args.kdeconnect_messages:
             phone = kdeconnect_transport()(sys.modules[__name__], args.kdeconnect_messages, machine_key, root, leaf)
         else:
-            endpoint = args.endpoint or kdeconnect_endpoint(args.kdeconnect_device)
-            phone = NetworkPhone(endpoint, machine_key, root, leaf)
+            resolver = (lambda **options: kdeconnect_endpoint(args.kdeconnect_device, **options)) if args.kdeconnect_device else None
+            phone = NetworkPhone(args.endpoint, machine_key, root, leaf, resolver)
         phone.check()
     else:
         phone = Phone(args.serial)

@@ -15,7 +15,8 @@
 | Phone key invalidated | Changes to enrolled biometrics/lock-screen state may invalidate it. Recovery requires deliberate new enrollment and protected trust configuration, not an automatic bypass. |
 | Certificate expired | Phone certificates last one year. Renew enrollment explicitly; update the protected snapshot. There is no unattended renewal service. |
 | `host.py revoke` did not disable kdesu | Development state and root-protected trust are separate. Use the installed configurator's `--revoke` as administrator. |
-| CLI works but kdesu cannot reach phone | The protected endpoint can differ from the CLI argument. Reconfigure the fixed address deliberately, or configure supported KDE Connect routing. |
+| Connection fails after Wi-Fi changes | Restore the phone’s Wi-Fi and press **Retry** beside the connection error. Each attempt uses a fresh request and resolves the current phone address. Retry is unavailable after execution may have started. |
+| CLI works but kdesu cannot reach phone | Configure LAN with `--kdeconnect-device` to follow the current paired phone address. Connection failures trigger one bounded KDE Connect discovery refresh. Check that the configured pairing is current, not an old offline device entry. |
 
 ## Diagnostic boundaries
 

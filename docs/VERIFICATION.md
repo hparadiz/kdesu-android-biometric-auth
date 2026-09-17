@@ -1,5 +1,38 @@
 # Verification record
 
+## Desktop 0.7.1 address discovery — 2026-09-16
+
+LAN authentication can use a paired KDE Connect device ID without a stored IP.
+Each request resolves the current address; a failed connection triggers one
+bounded UDP/mDNS discovery refresh and reconnects before sending any RPC. The
+existing biometric-key pin, request nonce, expiry and execution protocol remain.
+
+Python compilation and package-source equality checks passed. Focused fault
+injection verified reconnection, the single-retry bound, rejection of invalid
+addresses, no retry on an identity failure, and no discovery broadcast on a
+healthy lookup. A live connection to the obsolete phone address failed, then
+the new path discovered the running Android app and verified its enrolled key.
+This live check did not request biometric approval or execute a root command.
+The desktop package was then upgraded through Portage; installed checksums,
+helper ownership/mode and protected enrollment validation passed. The fixed
+endpoint was removed in favor of the current verified KDE Connect pairing.
+
+## kdesu Retry — 2026-09-16
+
+The local 6.7.2-r3 package adds Retry to the right of a phone connection error.
+It starts a fresh request after a terminal precommit failure and stays unavailable
+once execution may have started. The existing Qt suites passed **40 dialog and
+33 phone-client checks**, including retry with a new request ID, preserved
+command context, duplicate-click suppression and blocked postcommit retry.
+The error-row layout was also inspected in a rendered desktop preview.
+
+Portage installed the package locally. The installation itself completed through
+real phone-authorized root execution using the dynamic address configuration;
+protected execution evidence confirmed that path, and the installed executable
+contains the Retry control. After local installation, the user confirmed that
+the live workflow worked and explicitly approved publication. This confirmation
+is user-reported validation, separate from the automated and installer checks above.
+
 ## Live deployment evidence — 2026-09-08
 
 Reference environment: Gentoo Linux, KDE kdesu-gui 6.7.2-r2, navi-auth 0.7.0,

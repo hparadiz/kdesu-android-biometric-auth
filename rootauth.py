@@ -199,9 +199,9 @@ class Authority:
         self.phone_key_id = crypto.digest(crypto.spki(self.leaf.public_key()))
         self.kdeconnect_device = config.get("kdeconnect_device")
         self.kde_messages = config.get("transport") == "kdeconnect-share"
-        if self.kde_messages and (not isinstance(self.kdeconnect_device, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.kdeconnect_device)):
+        if (self.kde_messages or self.kdeconnect_device is not None) and (not isinstance(self.kdeconnect_device, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.kdeconnect_device)):
             raise ValueError("The paired KDE Connect device is required")
-        self.phone = None if self.kde_messages else crypto.NetworkPhone(plain(config["endpoint"], 128, "Phone LAN endpoint"), self.key, self.root, self.leaf)
+        self.phone = None if self.kde_messages or self.kdeconnect_device else crypto.NetworkPhone(plain(config["endpoint"], 128, "Phone LAN endpoint"), self.key, self.root, self.leaf)
         self.db = sqlite3.connect(STATE / "executions.sqlite3")
         self.db.execute("CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY, desktop_id TEXT NOT NULL, payload BLOB NOT NULL, status TEXT NOT NULL)")
         # main holds the protected cross-process lock: only abandoned rows remain.
@@ -254,8 +254,10 @@ class Authority:
                     self.kdeconnect_device, self.key, self.root, self.leaf, self.account, event["environment"]))
                 await asyncio.wait({watcher, discovery}, return_when=asyncio.FIRST_COMPLETED)
             elif self.kdeconnect_device:
-                discovery = asyncio.create_task(asyncio.to_thread(crypto.kdeconnect_endpoint,
-                    self.kdeconnect_device, event["environment"], self.account))
+                resolver = lambda **options: crypto.kdeconnect_endpoint(
+                    self.kdeconnect_device, event["environment"], self.account, **options)
+                discovery = asyncio.create_task(asyncio.to_thread(crypto.NetworkPhone,
+                    None, self.key, self.root, self.leaf, resolver))
                 await asyncio.wait({watcher, discovery}, return_when=asyncio.FIRST_COMPLETED)
             if watcher.done() or reader.at_eof() or writer.is_closing() or time.monotonic() >= deadline:
                 if watcher.done() and not watcher.cancelled() and watcher.exception() is None:
@@ -265,7 +267,7 @@ class Authority:
                         terminal_sent = True
                 raise ConnectionError("Desktop ended during phone discovery")
             if discovery is not None:
-                self.phone = discovery.result() if self.kde_messages else crypto.NetworkPhone(discovery.result(), self.key, self.root, self.leaf)
+                self.phone = discovery.result()
             cwd_fd = os.open(cwd, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
             cwd = os.readlink(f"/proc/self/fd/{cwd_fd}")
             cwd_info = os.fstat(cwd_fd)

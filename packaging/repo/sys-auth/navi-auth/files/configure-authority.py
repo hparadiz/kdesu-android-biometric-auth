@@ -37,8 +37,8 @@ def main():
         raise SystemExit("Explicit source, desktop UID, and both key IDs are required")
     if args.transport == "kdeconnect-share" and not args.kdeconnect_device:
         raise SystemExit("The paired KDE Connect device is required")
-    if args.transport == "lan" and not args.endpoint:
-        raise SystemExit("A phone LAN endpoint is required for direct TLS")
+    if args.transport == "lan" and not (args.endpoint or args.kdeconnect_device):
+        raise SystemExit("A paired KDE Connect device or explicit LAN endpoint is required for direct TLS")
     from cryptography import x509
     from cryptography.hazmat.primitives import serialization
     source = args.source_state.resolve()
@@ -75,7 +75,7 @@ def main():
         temporary.replace(output)
     config = dict(enabled=True, transport=args.transport, uid=args.uid, phone_key_id=args.phone_key_id,
                   machine_key_id=args.machine_key_id, phone_certificate_b64=base64.b64encode(bytes(row[0])).decode("ascii"))
-    if args.endpoint:
+    if args.endpoint and not args.kdeconnect_device:
         config["endpoint"] = args.endpoint
     if args.kdeconnect_device:
         config["kdeconnect_device"] = args.kdeconnect_device

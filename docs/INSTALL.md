@@ -111,6 +111,7 @@ tar -xf build/kde/kde-cli-tools-6.7.2.tar.xz -C build/kde
 cd build/kde/kde-cli-tools-6.7.2
 patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.1.80-build-only-kdesu.patch"
 patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.7.2-r2-navi.patch"
+patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.7.2-r3-retry.patch"
 cmake -S . -B ../out -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_DOC=OFF -DBUILD_TESTING=ON
 cmake --build ../out --parallel 4
@@ -155,10 +156,10 @@ location = /var/db/repos/kdesu-biometric-source/packaging/kde-repo
 masters = gentoo
 auto-sync = no
 EOF
-ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.7.0.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.7.1.ebuild manifest
 emerge --pretend --verbose --oneshot \
-  '=sys-auth/navi-auth-0.7.0::navi-auth-local' \
-  '=kde-plasma/kdesu-gui-6.7.2-r2::navi-kde-local'
+  '=sys-auth/navi-auth-0.7.1::navi-auth-local' \
+  '=kde-plasma/kdesu-gui-6.7.2-r3::navi-kde-local'
 ```
 
 Resolve any package/keyword/USE differences deliberately for your system; the
@@ -168,8 +169,8 @@ After accepting the exact plan:
 
 ```sh
 emerge --ask=n --oneshot --usepkg=n --getbinpkg=n --autounmask=n \
-  '=sys-auth/navi-auth-0.7.0::navi-auth-local' \
-  '=kde-plasma/kdesu-gui-6.7.2-r2::navi-kde-local'
+  '=sys-auth/navi-auth-0.7.1::navi-auth-local' \
+  '=kde-plasma/kdesu-gui-6.7.2-r3::navi-kde-local'
 ```
 
 For existing phone-capable kdesu installations, run authorized administrative
@@ -184,12 +185,12 @@ user-writable build directory or point it at user-writable Python code.
 ## 6. Configure the protected enrollment
 
 In the administrator shell, substitute the enrolled user's path, numeric UID,
-phone address and both full key IDs reported by `host.py status`:
+paired KDE Connect device ID and both full key IDs reported by `host.py status`:
 
 ```sh
 /usr/bin/python3.14 -I /usr/libexec/navi-auth/configure-authority.py \
   --source-state /home/alice/kdesu-android-biometric-auth/.state \
-  --uid 1000 --transport lan --endpoint PHONE_IP:39841 \
+  --uid 1000 --transport lan --kdeconnect-device PAIRED_DEVICE_ID \
   --phone-key-id PHONE_KEY_SHA256 --machine-key-id MACHINE_KEY_SHA256
 /usr/bin/python3.14 -I /usr/libexec/navi-auth/rootauth.py --check
 stat -c '%U:%G %a %n' /usr/libexec/navi-auth/authorize \
@@ -200,7 +201,12 @@ Expected ownership: root:root; helper 4755; private trust directories 700. The
 configurator checks the selected identities and refuses a silent replacement of
 an existing different authority. Configuration copies the machine private key;
 the original development copy remains sensitive and is not automatically removed.
-Reserve a stable phone IP or explicitly update this endpoint if it changes.
+Find the paired device ID with `kdeconnect-cli --list-devices`. The LAN route
+resolves its current address for every request. On a connection failure it asks
+KDE Connect for one UDP/mDNS discovery refresh and reconnects to the running
+Android app, still verifying the enrolled biometric key. No phone IP is stored
+when a device ID is configured. An explicit `--endpoint PHONE_IP:39841` remains
+available for installations without KDE Connect discovery.
 
 ## 7. Verify kdesu and operate it
 
