@@ -45,7 +45,7 @@ mapfile -d '' sources < <(find app/src/main/java "$work_dir/generated" -name '*.
 "$javac_bin" --release 8 -parameters -Xlint:all,-options -cp "$android_jar" -d "$work_dir/classes" "${sources[@]}"
 "$jar_bin" --create --file "$work_dir/classes.jar" -C "$work_dir/classes" .
 "$java_bin" -cp "$tools_dir/lib/d8.jar" com.android.tools.r8.D8 --"$build_type" \
-    --lib "$android_jar" --min-api 30 --output "$work_dir/dex" "$work_dir/classes.jar"
+    --lib "$android_jar" --min-api 28 --output "$work_dir/dex" "$work_dir/classes.jar"
 cp "$work_dir/resources.apk" "$work_dir/unsigned.apk"
 "$jar_bin" --update --file "$work_dir/unsigned.apk" -C "$work_dir/dex" classes.dex
 "$tools_dir/zipalign" -f 4 "$work_dir/unsigned.apk" "$work_dir/aligned.apk"

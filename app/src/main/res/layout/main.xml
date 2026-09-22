@@ -22,6 +22,14 @@
             android:background="@drawable/brand_divider" android:layout_marginTop="24dp" android:layout_marginBottom="22dp" />
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
             android:text="Approve with your fingerprint." android:textSize="14sp" android:textColor="@color/navi_secondary" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical" android:background="@drawable/panel" android:layout_marginTop="16dp">
+            <Switch android:id="@+id/desk_reader" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:minHeight="48dp" android:text="Desk reader mode" android:textSize="18sp"
+                android:textColor="@color/navi_text" android:showText="false" android:switchPadding="16dp" />
+            <TextView style="@style/SetupBody"
+                android:text="Start fingerprint prompts automatically for paired computers. Keep Navi open and leave the rear sensor within reach. Your fingerprint is still required for every approval. The screen stays awake while Navi is open." />
+        </LinearLayout>
         <LinearLayout android:id="@+id/machine_badge" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:orientation="horizontal" android:gravity="center_vertical" android:visibility="gone"
             android:background="@drawable/machine_panel" android:layout_marginTop="16dp">

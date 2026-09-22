@@ -5,10 +5,10 @@ android {
     compileSdk 34
     defaultConfig {
         applicationId 'in.akuj.fingerprint'
-        minSdk 30
+        minSdk 28
         targetSdk 34
-        versionCode 11
-        versionName '0.8.2'
+        versionCode 12
+        versionName '0.8.3'
     }
     buildTypes {
         release { debuggable false }

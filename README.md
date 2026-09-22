@@ -24,10 +24,10 @@ part of the security boundary.
 
 | Component | Version / purpose |
 | --- | --- |
-| Android application | 0.8.2, API 30+, non-debuggable release mode |
-| Host CLI and native/Python authority | 0.7.1 with dynamic LAN discovery |
+| Android application | 0.8.3, API 28+, desk reader mode, non-debuggable release |
+| Host CLI and native/Python authority | 0.7.2 with concurrent enrolled-phone requests |
 | KDE patch and Gentoo packages | kdesu-gui 6.7.2-r3 against kde-cli-tools 6.7.2 |
-| Direct Wi-Fi transport | Pinned TLS 1.3 to the phone on TCP 39841 |
+| Direct Wi-Fi transport | Pinned TLS 1.3; restricted TLS 1.2 on Android 9; TCP 39841 |
 | Optional KDE Connect transport | Existing file sharing, or paired-device IP lookup |
 | Android CI | Builds debug and release modes with a disposable signing key |
 
@@ -35,6 +35,22 @@ The new dedicated KDE Connect plugin was a separate unfinished experiment. It is
 not needed for this release and is not included as a working feature. Bluetooth
 delivery, PAM, sudo, login, screen unlock and general PolicyKit integration are
 not implemented. Installing this does not reroute those authentication systems.
+
+## Desk reader mode and multiple phones
+
+Enable **Desk reader mode** in the Android app and leave Navi open and unlocked.
+A verified request from a paired computer opens the biometric prompt automatically
+and keeps the screen awake, so a face-down Nexus 6P can work through its rear
+fingerprint sensor alone. Each approval still requires a fresh biometric; pairing
+and network setup retain their manual approval steps. The setting is opt-in and
+persists across app restarts. Locking or leaving Navi suspends automatic prompting.
+
+The desktop attempts every enabled authenticator in its protected enrollment
+registry concurrently. The first verified approval wins; other requests are
+withdrawn, and an offline or declining phone does not block another phone. Adding
+a device to KDE Connect alone does not enroll it for biometric authorization.
+See [installation](docs/INSTALL.md#6-configure-the-protected-enrollment) for
+`--add-phone` and per-phone revocation.
 
 ## Start here
 

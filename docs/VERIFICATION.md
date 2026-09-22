@@ -1,5 +1,37 @@
 # Verification record
 
+## Android 0.8.3 and desktop 0.7.2 — 2026-09-21
+
+A Nexus 6P running an Android 9/API 28 ROM was enrolled using a real fingerprint,
+then updated in place to a non-debuggable release. Hardware-backed per-operation
+signing, certificate-pinned TLS 1.2 (ECDHE-ECDSA/AES-GCM), and direct Wi-Fi
+biometric authentication passed. The existing APK signing identity was retained.
+Stock Nexus firmware older than Android 9 is outside the supported baseline.
+
+Desk reader mode was enabled, then survived force-stop and app restart with
+Android's screen-awake flag restored. During a real installed-kdesu request, no
+phone screen input was sent after the request started. Android logged automatic
+biometric prompt initiation less than one second after verified delivery and
+confirmed the signed computer receipt about two seconds later.
+
+The installed 0.7.2 authority delivered two successive kdesu requests to both an
+enrolled Pixel and the Nexus. Nexus approval launched each child as UID 0 with
+exit status 0. Read-only inspection of the protected execution database showed
+one consumed Nexus proof and one canceled competing Pixel request per dialog.
+The second run used automatic desk-reader prompting. Package source hashes and
+the protected two-phone registry were verified after the Portage upgrade.
+
+The existing KDE dialog and phone protocol suites passed (2/2). Android release
+build, APK alignment/signature and API compatibility checks passed; API lint
+reported zero errors and four existing inlined-constant warnings. No new Android
+or host test infrastructure was introduced.
+
+The public merge retains the earlier release enrollment/trust hardening and
+excludes the unfinished plugin transport experiment. Published builds are checked
+with a disposable signer; personal APK signing keys, pairing state, device IDs,
+local addresses and root authorization records are not part of the repository.
+
+
 ## Desktop 0.7.1 address discovery — 2026-09-16
 
 LAN authentication can use a paired KDE Connect device ID without a stored IP.
@@ -113,8 +145,7 @@ These are bounded acceptance/rejection checks, not a complete adversarial audit.
 - Physical reboot and first-unlock delivery without manually opening the app.
 - Deep Doze, long idle periods, vendor battery controls and sustained battery cost.
 - Adversarial live debugger, replay, cancellation/concurrency or hostile-load tests.
-- Independent inspection of root-private receipt/database/configuration contents.
-- Other phone manufacturers, older KDE versions, other distribution packaging.
+- Phones beyond the verified Pixel and Nexus, older KDE versions and other distribution packaging.
 - The unfinished dedicated KDE Connect plugin and future revisions.
 
 The [audit](SECURITY_AUDIT.md) explains the limits of static inspection. Successful

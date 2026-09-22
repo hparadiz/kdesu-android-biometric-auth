@@ -78,11 +78,34 @@ held working-directory inode, restricted environment and desktop dialog ID.
 Approval and commit share a 120-second deadline. SQLite consumes each pending
 proof once. A certificate by itself is not a reusable authentication token.
 
-Direct LAN uses TLS 1.3. Before sending command metadata, the host verifies that
+Direct LAN uses TLS 1.3 on Android 10+. Android 9 uses TLS 1.2 with only
+ECDHE-ECDSA/AES-GCM suites; the host accepts both. Before sending command metadata,
+the host verifies that
 the peer certificate exactly matches the TLS binding signed by the approved phone
 biometric key. Each RPC is machine-signed and bound to a fresh server nonce.
 Frames and transaction lifetimes are bounded. Certificate pinning authenticates
 the endpoint even when routing information comes from KDE Connect.
+
+## Concurrent enrolled phones
+
+The protected registry contains up to 32 phone entries, each with an approved
+certificate, enablement and route. Legacy single-phone configuration remains
+readable. One desktop dialog creates independent signed challenges and nonces for
+all enabled phones concurrently, with a shared command/context and deadline.
+Transport failures, declines and invalid responses are isolated to their phone.
+
+The first cryptographically verified response selects the winner. The helper
+withdraws competing requests, then uses the existing ready/commit protocol to
+consume only the winning proof and launch the command once. Cancellation has
+priority if it arrives alongside an approval. Slow transfer completion precedes
+its signed withdrawal; file transports retain cancellation tombstones. This
+fan-out does not allow multiple desktop dialogs to share execution authority.
+
+Desk reader mode affects only prompt initiation in the Android activity. It
+checks foreground focus, unlocked state, validated request kind, expiry and
+withdrawal before entering the unchanged per-use CryptoObject flow. The last
+automatically prompted request ID persists to prevent prompt loops after restart.
+Enrollment is never automatically prompted.
 
 ## One execution owner
 
@@ -112,10 +135,11 @@ database and `last-execution.json` store approval/receipt evidence;
 `commands.log` receives command diagnostics. These can contain sensitive commands.
 
 `host.py revoke` only changes development state. The installed configurator's
-`--revoke` disables protected authorization. The configuration digest is rechecked
-at commit: revocation observed before that point prevents execution; an already
-committed command is not undone. A stronger revoke-return concurrency guarantee
-has not been established. Stopping phone notifications alone is not revocation.
+`--revoke` disables all protected phones, or one when combined with
+`--phone-key-id`. Configuration writes and execution commit share a lock, and the
+exact configuration digest is rechecked at commit. A change before commit prevents
+execution; an already committed command is not undone. Stopping phone notifications
+alone is not revocation.
 
 The current phone UI lists paired computers and supports **Reset key and all
 pairings**. That reset affects every computer and invalidates existing enrollment;
@@ -124,7 +148,7 @@ there is no polished per-computer forget workflow yet.
 ## KDE Connect options
 
 The included `kdeconnect_transport.py` uses existing file sharing with Navi's
-Android DocumentsProvider. Select Navi Authenticator as KDE Connect's custom
+Android DocumentsProvider on Android 10+. Select Navi Authenticator as KDE Connect's custom
 destination folder, grant access, then use
 `host.py authenticate --kdeconnect-messages DEVICE_ID`. Signed replies and
 cancellations travel through the existing pairing. Ordinary files go to Downloads.

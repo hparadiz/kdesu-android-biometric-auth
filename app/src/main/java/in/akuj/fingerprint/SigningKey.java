@@ -31,17 +31,21 @@ final class SigningKey {
         id = hex.toString();
     }
 
+    @SuppressWarnings("deprecation") // Android 9/10 require the per-operation validity API.
     static synchronized SigningKey prepare() throws Exception {
         KeyStore store = openStore();
         if (!store.containsAlias(ALIAS)) {
             KeyPairGenerator generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore");
-            generator.initialize(new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN)
+            KeyGenParameterSpec.Builder parameters = new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN)
                     .setAlgorithmParameterSpec(new ECGenParameterSpec("secp256r1"))
                     .setDigests(KeyProperties.DIGEST_SHA256)
                     .setUserAuthenticationRequired(true)
-                    .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
-                    .setInvalidatedByBiometricEnrollment(true)
-                    .build());
+                    .setInvalidatedByBiometricEnrollment(true);
+            if (Build.VERSION.SDK_INT >= 30)
+                parameters.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG);
+            else
+                parameters.setUserAuthenticationValidityDurationSeconds(-1);
+            generator.initialize(parameters.build());
             generator.generateKeyPair();
         }
         PrivateKey privateKey = (PrivateKey) store.getKey(ALIAS, null);

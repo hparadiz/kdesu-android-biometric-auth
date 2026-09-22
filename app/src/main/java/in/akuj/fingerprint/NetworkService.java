@@ -94,7 +94,10 @@ public final class NetworkService extends Service {
         }
         createChannel(this);
         if (!running) status = "Starting network connection…";
-        startForeground(NOTIFICATION_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+        if (Build.VERSION.SDK_INT >= 29)
+            startForeground(NOTIFICATION_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+        else
+            startForeground(NOTIFICATION_ID, notification());
         getSystemService(NotificationManager.class).cancel(RECOVERY_NOTIFICATION_ID);
         if (!running) {
             running = true;
@@ -129,7 +132,9 @@ public final class NetworkService extends Service {
             try (SSLServerSocket server = (SSLServerSocket) socketFactory.createServerSocket()) {
                 listener = server;
                 server.setReuseAddress(true);
-                server.setEnabledProtocols(new String[]{"TLSv1.3"});
+                server.setEnabledProtocols(new String[]{NetworkIdentity.TLS_PROTOCOL});
+                if (Build.VERSION.SDK_INT < 29) server.setEnabledCipherSuites(new String[]{
+                        "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"});
                 server.bind(new InetSocketAddress(PORT), 4);
                 publishStatus("Ready on your network · port " + PORT);
                 retrySeconds = 1;

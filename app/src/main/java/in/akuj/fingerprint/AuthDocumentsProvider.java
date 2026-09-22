@@ -30,6 +30,7 @@ import java.util.concurrent.TimeUnit;
 import org.json.JSONObject;
 
 /** A SAF destination for stock KDE Connect. Normal shares retain their Downloads destination. */
+@android.annotation.TargetApi(29) // Disabled by a versioned manifest resource below Android 10.
 public final class AuthDocumentsProvider extends DocumentsProvider {
     private static final String ROOT_ID = "navi";
     private static final String[] DOCUMENT_COLUMNS = {Document.COLUMN_DOCUMENT_ID, Document.COLUMN_DISPLAY_NAME,

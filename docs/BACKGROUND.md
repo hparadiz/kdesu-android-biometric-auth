@@ -37,8 +37,9 @@ uninterrupted connectivity. See Android's
 - Socket failures retry from 1 second up to 30 seconds. An invalid/missing network
   identity needs manual repair by opening the app and enabling the connection.
 - Android may allow dismissing an ongoing notification. Dismissal alone does not
-  stop the service. The app does not keep the display on or hold a permanent wake
-  lock. Battery Saver and manufacturer power management can still interrupt it.
+  stop the service. The background service does not keep the display on or hold a
+  permanent wake lock; foreground Desk reader mode keeps its activity awake.
+  Battery Saver and manufacturer power management can still interrupt delivery.
 
 ## Check actual background delivery
 
@@ -56,3 +57,15 @@ it does not add sudo/PAM integration. Repeat after reboot and first unlock, and
 after prolonged idle, when assessing your own device. Current evidence establishes
 service availability after update and successful LAN approval, not deep-Doze
 reliability or measured battery cost.
+
+## Stationary fingerprint reader
+
+Android 0.8.3 adds **Desk reader mode**, off by default. Enable it and leave Navi
+open and unlocked to automatically start fingerprint prompts for verified requests
+from paired computers. This is useful for rear-sensor phones lying face down.
+The app keeps its visible screen awake; leaving the app restores normal screen
+sleep behavior. A fingerprint is still required for each signature. Canceling,
+expiry or withdrawal ends that request without repeated automatic prompts.
+
+This mode does not wake a locked phone or bring a background app to the front.
+It uses Android's [activity screen-on flag](https://developer.android.com/develop/background-work/background-tasks/awake/screen-on).

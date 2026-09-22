@@ -2,9 +2,10 @@
 
 ## Supported baseline
 
-- Android 11/API 30 or newer, enrolled strong biometrics and a hardware-backed
-  Keystore signing implementation. Tested on Pixel 9 Pro, Android 16/API 36.
-  **The current ADB enrollment and install helpers explicitly require a Pixel.**
+- Android 9/API 28 or newer, enrolled strong biometrics and a hardware-backed
+  Keystore signing implementation. Tested on Pixel 9 Pro (Android 16/API 36) and
+  Nexus 6P (Android 9/API 28 ROM). Stock Nexus firmware older than Android 9 is
+  unsupported. **ADB enrollment and installation accept Pixel or Nexus 6P.**
   Other manufacturers are unverified and need the model restriction reviewed;
   installing an APK manually does not remove the enrollment helper restriction.
 - Linux with Python and `cryptography` **42+** for the manual host CLI. The
@@ -44,8 +45,8 @@ workflow and protected signing-key custody are still needed for wider deployment
 
 ## 2. Connect ADB and enroll
 
-Use a trusted computer and authorize USB debugging, or enable Android's Wireless
-debugging and use **Pair device with pairing code**:
+Use a trusted computer and authorize USB debugging. Android 11+ also supports
+Wireless debugging with **Pair device with pairing code**:
 
 ```sh
 adb pair PHONE_IP:PAIRING_PORT
@@ -56,7 +57,7 @@ python3 host.py init
 python3 host.py enroll --serial PHONE_IP:CONNECTION_PORT
 ```
 
-Use the USB serial instead if connected over USB. The pairing port and connection
+Use the USB serial instead if connected over USB, including on Android 9. The pairing port and connection
 port are different. Always select a device explicitly. On the phone, review the
 computer enrollment request, tap Approve and complete the biometric operation.
 The host must print `ENROLLED`. Save the IDs from `python3 host.py status`.
@@ -93,6 +94,14 @@ adb -s PHONE_IP:CONNECTION_PORT shell run-as in.akuj.fingerprint id
 Expected: `package not debuggable`. Disable/revoke development debugging access
 when it is no longer needed. Direct Wi-Fi authentication continues without ADB.
 See [SECURITY.md](../SECURITY.md) for the remaining app-update signing risk.
+
+For a stationary rear-sensor phone, turn on **Desk reader mode** and leave Navi
+open and unlocked. Incoming authentication requests open the biometric prompt
+automatically; the screen stays awake while Navi is visible. Canceled requests
+do not reopen themselves. This does not start the app from the background or
+unlock the device. New enrollment and network setup still require their normal
+taps. Android 9 uses direct Wi-Fi; the optional KDE Connect folder bridge requires
+Android 10+ and is hidden on Android 9.
 
 ## 4. Build the KDE integration without installing
 
@@ -156,9 +165,9 @@ location = /var/db/repos/kdesu-biometric-source/packaging/kde-repo
 masters = gentoo
 auto-sync = no
 EOF
-ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.7.1.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.7.2.ebuild manifest
 emerge --pretend --verbose --oneshot \
-  '=sys-auth/navi-auth-0.7.1::navi-auth-local' \
+  '=sys-auth/navi-auth-0.7.2::navi-auth-local' \
   '=kde-plasma/kdesu-gui-6.7.2-r3::navi-kde-local'
 ```
 
@@ -169,7 +178,7 @@ After accepting the exact plan:
 
 ```sh
 emerge --ask=n --oneshot --usepkg=n --getbinpkg=n --autounmask=n \
-  '=sys-auth/navi-auth-0.7.1::navi-auth-local' \
+  '=sys-auth/navi-auth-0.7.2::navi-auth-local' \
   '=kde-plasma/kdesu-gui-6.7.2-r3::navi-kde-local'
 ```
 
@@ -207,6 +216,37 @@ KDE Connect for one UDP/mDNS discovery refresh and reconnects to the running
 Android app, still verifying the enrolled biometric key. No phone IP is stored
 when a device ID is configured. An explicit `--endpoint PHONE_IP:39841` remains
 available for installations without KDE Connect discovery.
+
+### Add another enrolled phone
+
+Enroll the additional phone with the **same machine identity/state directory**
+using the debug ADB bootstrap, then restore its release app and enable its network
+connection. Select the intended certificate with `--phone-key-id` when using the
+host CLI after multiple phones have been enrolled.
+
+From the administrator shell, add the reviewed phone without replacing the others:
+
+```sh
+/usr/bin/python3.14 -I /usr/libexec/navi-auth/configure-authority.py \
+  --source-state /home/alice/kdesu-android-biometric-auth/.state \
+  --uid 1000 --transport lan --endpoint SECOND_PHONE_IP:39841 \
+  --phone-key-id SECOND_PHONE_KEY_SHA256 --machine-key-id MACHINE_KEY_SHA256 \
+  --add-phone
+/usr/bin/python3.14 -I /usr/libexec/navi-auth/rootauth.py --check
+```
+
+Use `--kdeconnect-device SECOND_DEVICE_ID` instead of `--endpoint` for discovery.
+The protected registry holds up to 32 phones, each with its own certificate and
+route. Existing single-phone configuration remains readable and migrates when
+updated. The desktop sends all enabled phones independent requests for the same
+command; the first verified approval wins, and other phones receive withdrawals.
+
+To disable one phone while retaining the others:
+
+```sh
+/usr/bin/python3.14 -I /usr/libexec/navi-auth/configure-authority.py \
+  --revoke --phone-key-id PHONE_KEY_SHA256
+```
 
 ## 7. Verify kdesu and operate it
 

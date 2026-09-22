@@ -2,14 +2,17 @@ package in.akuj.fingerprint;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.KeyguardManager;
 import android.app.NotificationManager;
 import android.Manifest;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
+import android.hardware.fingerprint.FingerprintManager;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.CancellationSignal;
@@ -20,8 +23,10 @@ import android.provider.Settings;
 import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.util.Log;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.ImageView;
+import android.widget.Switch;
 import android.widget.TextView;
 import org.json.JSONObject;
 import java.security.Signature;
@@ -35,13 +40,15 @@ public final class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView status, detail, challenge, keyInfo;
     private Button authenticate, enroll, reset, proof;
+    private Switch deskReader;
+    private SharedPreferences deskSettings;
     private Bridge bridge;
     private SigningKey key;
     private Challenge pending, awaiting;
     private JSONObject signedResponse;
     private Attempt active;
     private String seenEnvelope, proofText, openedRequestId;
-    private boolean stopped = true, busy, ready;
+    private boolean stopped = true, resumed, busy, ready;
     private CancellationSignal networkCancellation;
     private final Runnable timeout = () -> cancel("Challenge expired", "Start a fresh request on the computer.");
     private final Runnable poll = new Runnable() {
@@ -79,6 +86,14 @@ public final class MainActivity extends Activity {
         enroll = findViewById(R.id.enroll);
         reset = findViewById(R.id.reset);
         proof = findViewById(R.id.proof);
+        deskSettings = getSharedPreferences("desk_reader", MODE_PRIVATE);
+        deskReader = findViewById(R.id.desk_reader);
+        deskReader.setChecked(deskSettings.getBoolean("enabled", false));
+        updateDeskReader();
+        deskReader.setOnCheckedChangeListener((button, enabled) -> {
+            deskSettings.edit().putBoolean("enabled", enabled).apply();
+            updateDeskReader();
+        });
         Button detailsToggle = findViewById(R.id.details_toggle);
         View connectionDetails = findViewById(R.id.connection_details);
         detailsToggle.setOnClickListener(v -> {
@@ -91,8 +106,12 @@ public final class MainActivity extends Activity {
             else if (KdeConnectInbox.uses(awaiting)) sendKdeApproval();
             else begin();
         });
-        enroll.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_BIOMETRIC_ENROLL)
-                .putExtra(Settings.EXTRA_BIOMETRIC_AUTHENTICATORS_ALLOWED, BiometricManager.Authenticators.BIOMETRIC_STRONG)));
+        enroll.setOnClickListener(v -> {
+            Intent settings = Build.VERSION.SDK_INT >= 30 ? new Intent(Settings.ACTION_BIOMETRIC_ENROLL)
+                    .putExtra(Settings.EXTRA_BIOMETRIC_AUTHENTICATORS_ALLOWED, BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                    : new Intent(Settings.ACTION_FINGERPRINT_ENROLL);
+            startActivity(settings);
+        });
         reset.setOnClickListener(v -> new AlertDialog.Builder(this)
                 .setTitle("Reset key and all computer pairings?")
                 .setMessage("The signing key and all pairings will be deleted. Each computer must approve the new key before you can authenticate again.")
@@ -131,9 +150,57 @@ public final class MainActivity extends Activity {
         handler.post(poll);
     }
 
+    @Override protected void onResume() {
+        super.onResume();
+        resumed = true;
+    }
+
+    @Override protected void onPause() {
+        resumed = false;
+        super.onPause();
+    }
+
+    private void updateDeskReader() {
+        if (deskReader.isChecked()) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
+    private void maybeAutoStart() {
+        // pollComputer has already verified the pairing, signature, expiry and withdrawal.
+        // Opening the prompt never authorizes a signature: the same CryptoObject still does.
+        if (!deskReader.isChecked() || !resumed || stopped || !hasWindowFocus()
+                || !ready || key == null || busy || active != null || networkCancellation != null
+                || pending == null || !pending.kind.equals("authenticate") || pending.expired()
+                || getSystemService(KeyguardManager.class).isDeviceLocked()
+                || pending.id.equals(deskSettings.getString("last_request", null))) return;
+        // Persist before prompting so recreation cannot repeatedly reopen a canceled request.
+        if (!deskSettings.edit().putString("last_request", pending.id).commit()) {
+            setStatus("Tap to approve", "Desk reader could not save this request. Use Approve request.");
+            return;
+        }
+        Log.i(TAG, "Desk reader starting biometric prompt; request=" + pending.id);
+        begin();
+    }
+
+    @SuppressWarnings("deprecation") // Before Android 11, inspect fingerprint enrollment; CryptoObject enforces signing.
+    private int biometricAvailability() {
+        if (Build.VERSION.SDK_INT >= 30)
+            return getSystemService(BiometricManager.class).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG);
+        FingerprintManager fingerprints = getSystemService(FingerprintManager.class);
+        if (fingerprints == null || !fingerprints.isHardwareDetected()) return BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE;
+        return fingerprints.hasEnrolledFingerprints() ? BiometricManager.BIOMETRIC_SUCCESS : BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED;
+    }
+
+    private BiometricPrompt.Builder biometricPrompt() {
+        BiometricPrompt.Builder builder = new BiometricPrompt.Builder(this);
+        if (Build.VERSION.SDK_INT >= 30) builder.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG);
+        if (Build.VERSION.SDK_INT >= 29) builder.setConfirmationRequired(true);
+        // Android 9's CryptoObject prompt already requires a per-operation biometric.
+        return builder;
+    }
+
     private void refresh() {
-        int availability = getSystemService(BiometricManager.class)
-                .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG);
+        int availability = biometricAvailability();
         ready = availability == BiometricManager.BIOMETRIC_SUCCESS;
         authenticate.setEnabled(ready && !busy && active == null && (key == null || pending != null
                 || KdeConnectInbox.uses(awaiting) && !awaiting.expired()));
@@ -141,6 +208,7 @@ public final class MainActivity extends Activity {
                 ? "Approve enrollment" : "Approve request");
         enroll.setVisibility(availability == BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED ? View.VISIBLE : View.GONE);
         reset.setEnabled(active == null && !busy);
+        deskReader.setEnabled(active == null && !busy);
         findViewById(R.id.network_toggle).setEnabled(key != null && ready && !busy && active == null);
         findViewById(R.id.background_setup).setEnabled(!busy && active == null);
         if (!ready) setStatus("Biometrics unavailable", availability == BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED
@@ -275,6 +343,7 @@ public final class MainActivity extends Activity {
                     setStatus("Computer confirmation missing", "The phone signed, but no verified computer confirmation arrived. Start a new request.");
                 }
             }
+            maybeAutoStart();
         } catch (Exception error) {
             pending = null;
             awaiting = null;
@@ -310,14 +379,12 @@ public final class MainActivity extends Activity {
         if (attempt.request.expired()) { timeout.run(); return; }
         setStatus("Waiting for your fingerprint", attempt.request.operation);
         try {
-            new BiometricPrompt.Builder(this)
+            biometricPrompt()
                     .setTitle(attempt.request.kind.equals("enroll") ? "Approve computer pairing" : "Approve authentication")
                     .setSubtitle(attempt.request.context.optString("application") + " · " + attempt.request.machineName)
                     .setDescription((attempt.request.notificationOnly() ? "Verification preview. Desktop authentication is separate.\n" : "")
                             + attempt.request.operation + "\nAccount: " + attempt.request.context.optString("target_user")
                             + (attempt.request.context.optString("command").isEmpty() ? "" : "\n" + attempt.request.context.optString("command")))
-                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-                    .setConfirmationRequired(true)
                     .setNegativeButton("Cancel", getMainExecutor(), (dialog, which) -> {
                         declineAttempt(attempt, "Approval canceled", "Start a new request on the computer to try again.");
                     }).build().authenticate(new BiometricPrompt.CryptoObject(attempt.signature),
@@ -483,9 +550,12 @@ public final class MainActivity extends Activity {
     }
 
     private void updateNetworkStatus() {
+        boolean sharingSupported = getResources().getBoolean(R.bool.kdeconnect_sharing_supported);
         boolean received = getSharedPreferences("kdeconnect", 0).getBoolean("received", false);
         ((TextView) findViewById(R.id.kdeconnect_status)).setText(received
                 ? "KDE Connect · signed communication is ready" : "Use your existing KDE Connect pairing");
+        findViewById(R.id.kdeconnect_status).setVisibility(sharingSupported ? View.VISIBLE : View.GONE);
+        findViewById(R.id.kdeconnect_setup).setVisibility(sharingSupported ? View.VISIBLE : View.GONE);
         ((Button) findViewById(R.id.kdeconnect_setup)).setText(received ? "KDE Connect settings" : "Set up KDE Connect");
         ((TextView) findViewById(R.id.network_status)).setText(NetworkService.status);
         ((TextView) findViewById(R.id.background_summary)).setText(BackgroundSetupActivity.summary(this));
@@ -543,10 +613,9 @@ public final class MainActivity extends Activity {
                     CancellationSignal cancellation = new CancellationSignal();
                     networkCancellation = cancellation;
                     try {
-                        new BiometricPrompt.Builder(this).setTitle("Enable network authentication")
+                        biometricPrompt().setTitle("Enable network authentication")
                                 .setSubtitle("Connect your paired computers without debugging")
                                 .setDescription("Bind this phone’s encrypted network connection to its approved signing key. Each command will still require a new biometric approval.")
-                                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                                 .setNegativeButton("Cancel", getMainExecutor(), (dialog, which) -> finishNetworkSetup(cancellation, null))
                                 .build().authenticate(new BiometricPrompt.CryptoObject(signature), cancellation,
                                         getMainExecutor(), new BiometricPrompt.AuthenticationCallback() {

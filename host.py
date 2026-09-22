@@ -124,11 +124,11 @@ class Phone:
     def __init__(self, serial):
         self.serial = serial
         model = self.adb("shell", "getprop", "ro.product.model").decode().strip()
-        if not model.startswith("Pixel"):
-            raise ValueError(f"Expected the selected Pixel; found {model!r}.")
+        if not model.startswith("Pixel") and model != "Nexus 6P":
+            raise ValueError(f"Expected the selected Pixel or Nexus 6P; found {model!r}.")
         sdk = int(self.adb("shell", "getprop", "ro.build.version.sdk").decode().strip())
-        if sdk < 30:
-            raise ValueError("Android 11 or newer is required.")
+        if sdk < 28:
+            raise ValueError("Android 9 or newer is required.")
 
     def adb(self, *args, data=None, optional=False):
         result = subprocess.run(["adb", "-s", self.serial, *args], input=data,
@@ -228,7 +228,9 @@ class NetworkPhone:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        # Android 9 needs TLS 1.2; keep its suites forward-secret and AEAD-only.
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.set_ciphers("ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("Phone connection timed out after network discovery")
@@ -562,7 +564,7 @@ def main():
     for name in ("enroll", "authenticate"):
         command = sub.add_parser(name)
         transport = command.add_mutually_exclusive_group(required=True)
-        transport.add_argument("--serial", help="Explicit Pixel ADB serial (development only)")
+        transport.add_argument("--serial", help="Explicit Pixel or Nexus 6P ADB serial (development only)")
         if name == "authenticate":
             transport.add_argument("--endpoint", help="Phone LAN IP:port, no debugging required")
             transport.add_argument("--kdeconnect-device", help="Resolve the paired phone's current LAN IP through KDE Connect")

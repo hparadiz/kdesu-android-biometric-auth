@@ -2,6 +2,7 @@ package in.akuj.fingerprint;
 
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
+import android.os.Build;
 import java.math.BigInteger;
 import java.net.Socket;
 import java.security.KeyPairGenerator;
@@ -20,6 +21,7 @@ import org.json.JSONObject;
 
 /** Transport key only. It cannot sign biometric command approvals. */
 final class NetworkIdentity {
+    static final String TLS_PROTOCOL = Build.VERSION.SDK_INT >= 29 ? "TLSv1.3" : "TLSv1.2";
     private static final String ALIAS = "phone-authenticator.network-tls.v1";
     final X509Certificate certificate;
     private final PrivateKey privateKey;
@@ -79,7 +81,7 @@ final class NetworkIdentity {
             @Override public String chooseClientAlias(String[] types, Principal[] issuers, Socket socket) { return null; }
             @Override public String[] getClientAliases(String type, Principal[] issuers) { return null; }
         };
-        SSLContext context = SSLContext.getInstance("TLSv1.3");
+        SSLContext context = SSLContext.getInstance(TLS_PROTOCOL);
         context.init(new KeyManager[]{manager}, null, new SecureRandom());
         return context;
     }
