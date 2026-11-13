@@ -5,8 +5,10 @@ umask 077
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$project_dir"
 build_type="${1:-release}"
-if [[ $# -gt 1 || ( "$build_type" != release && "$build_type" != debug ) ]]; then
-    echo "Usage: $0 [release|debug]" >&2
+new_key="${2:-}"
+if [[ $# -gt 2 || ( "$build_type" != release && "$build_type" != debug ) || ( -n "$new_key" && "$new_key" != --new-key ) ]]; then
+    echo "Usage: $0 [release|debug] [--new-key]" >&2
+    echo '  --new-key  create build/debug.keystore for a first installation (never for updates)' >&2
     exit 1
 fi
 resource_options=()
@@ -29,8 +31,13 @@ done
 out_dir="$project_dir/build"
 # Preserve the existing app signing identity for in-place updates.
 mkdir -p "$out_dir"
-if [[ "$build_type" == release && ! -f "$out_dir/debug.keystore" ]]; then
+if [[ "$new_key" == --new-key && -f "$out_dir/debug.keystore" ]]; then
+    echo 'build/debug.keystore already exists; refusing to replace the app signing identity.' >&2
+    exit 1
+fi
+if [[ "$build_type" == release && ! -f "$out_dir/debug.keystore" && "$new_key" != --new-key ]]; then
     echo 'Release update requires the existing build/debug.keystore; refusing to generate a replacement signing identity.' >&2
+    echo 'For a first installation on a new phone, run: ./build.sh release --new-key' >&2
     exit 1
 fi
 rm -rf -- "$out_dir/intermediates"

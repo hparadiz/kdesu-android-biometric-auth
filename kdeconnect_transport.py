@@ -30,7 +30,8 @@ MAX_SPOOL_FILES = 96
 DEVICE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 DEVICE_PATH_ID = re.compile(r"[A-Za-z0-9_]{1,128}\Z")
 REQUEST_ID = re.compile(r"[a-f0-9]{32}\Z")
-MAIL_FILE = re.compile(r"navi-auth-(request|receipt|cancel)-[a-f0-9]{32}\.json\Z")
+MAIL_FILE = re.compile(r"navi-auth-(request|receipt|cancel|enroll-offer)-[a-f0-9]{32}\.json\Z")
+INTERPRETER = "/usr/bin/python3"
 SERVICE = "org.kde.kdeconnect"
 SHARE_INTERFACE = "org.kde.kdeconnect.device.share"
 
@@ -69,15 +70,48 @@ def _write_all(fd, data, deadline):
         data = data[count:]
 
 
+def _worker_environment(supplied):
+    runtime = supplied.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    env = {"PATH": "/usr/bin:/bin", "HOME": pwd.getpwuid(os.getuid()).pw_dir, "XDG_RUNTIME_DIR": runtime,
+           "DBUS_SESSION_BUS_ADDRESS": supplied.get("DBUS_SESSION_BUS_ADDRESS", "")}
+    if not env["DBUS_SESSION_BUS_ADDRESS"]:
+        raise ValueError("The desktop session D-Bus address is required")
+    return env
+
+
+def list_devices(environment=None):
+    """Paired KDE Connect devices of this desktop session, for display and selection only."""
+    if os.getuid() == 0 or os.geteuid() == 0:
+        raise ValueError("Device listing requires the non-root desktop account")
+    env = _worker_environment(dict(os.environ if environment is None else environment))
+    result = subprocess.run([INTERPRETER, "-I", str(Path(__file__).resolve()), "--list"],
+                            stdin=subprocess.DEVNULL, capture_output=True, cwd="/", env=env, timeout=15)
+    if len(result.stdout) > MAX_FRAME:
+        raise ValueError("Oversized KDE Connect device list")
+    reply = _object(result.stdout.split(b"\n", 1)[0] or b"{}")
+    if reply.get("ok") is not True:
+        raise ValueError(reply.get("error", "KDE Connect device listing failed"))
+    devices = reply.get("devices")
+    if not isinstance(devices, list):
+        raise ValueError("Invalid KDE Connect device list")
+    return devices
+
+
 class KdeConnectPhone:
-    """NetworkPhone-compatible adapter; check() reports routing availability."""
+    """NetworkPhone-compatible adapter; check() reports routing availability.
+
+    With leaf=None the adapter only carries the code-pairing offer and the phone's
+    tagged hello; the enrollment request itself always uses a certified leaf.
+    """
 
     def __init__(self, crypto, device_id, machine_key, root, leaf, account=None, environment=None):
         if not isinstance(device_id, str) or not DEVICE_PATH_ID.fullmatch(device_id):
             raise ValueError("Invalid KDE Connect device ID")
-        crypto.validate_certificate(leaf, root)
+        if leaf is not None:
+            crypto.validate_certificate(leaf, root)
         self.crypto, self.key, self.root, self.leaf = crypto, machine_key, root, leaf
-        self.phone_id = crypto.digest(crypto.spki(leaf.public_key()))
+        self.device_id = device_id
+        self.phone_id = crypto.digest(crypto.spki(leaf.public_key())) if leaf is not None else None
         self.request_id = None
         self._request = None
         self._input = bytearray()
@@ -97,7 +131,7 @@ class KdeConnectPhone:
             options.update(user=desktop.pw_uid, group=desktop.pw_gid, extra_groups=[])
         try:
             self._process = subprocess.Popen(
-                ["/usr/bin/python3.14", "-I", str(Path(__file__).resolve()), "--worker", device_id],
+                [INTERPRETER, "-I", str(Path(__file__).resolve()), "--worker", device_id],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 cwd="/", env=env, close_fds=True, start_new_session=True, umask=0o077, **options)
             os.set_blocking(self._process.stdin.fileno(), False)
@@ -148,13 +182,38 @@ class KdeConnectPhone:
 
     def check(self):
         self._rpc("check")
-        return self.identity()
+        return self.identity() if self.leaf is not None else None
 
     def identity(self):
+        if self.leaf is None:
+            raise ValueError("The phone identity is only known after code pairing")
         return dict(key_id_sha256=self.phone_id,
                     public_key_spki_base64=self.crypto.b64(self.crypto.spki(self.leaf.public_key())))
 
+    def send_offer(self, session_id, offer):
+        """Share the machine-signed pairing offer; it is untrusted until the user types the code."""
+        if self.leaf is not None or self.request_id is not None:
+            raise ValueError("A pairing offer needs a fresh enrollment transport")
+        if not isinstance(session_id, str) or not REQUEST_ID.fullmatch(session_id):
+            raise ValueError("Invalid pairing session ID")
+        mail = {"domain": self.crypto.DOMAIN, "kind": "kdeconnect-mail", "name": "enroll-offer.json",
+                "request_id": session_id, "value": offer}
+        raw = _encode(mail)
+        if len(raw) > MAX_FILE:
+            raise ValueError("Pairing offer exceeds 65536 bytes")
+        self.request_id = session_id
+        self._rpc("send", filename=f"navi-auth-enroll-offer-{session_id}.json",
+                  data_b64=base64.b64encode(raw).decode(), request_id=session_id)
+
+    def read_hello(self):
+        if self.leaf is not None or self.request_id is None:
+            raise ValueError("No pairing offer is outstanding")
+        value = self._rpc("read")
+        return value if isinstance(value, dict) and value.get("kind") == "enroll-hello" else None
+
     def write(self, name, value):
+        if self.leaf is None:
+            raise ValueError("Enrollment requests require the certified phone key")
         if name not in {"request.json", "receipt.json", "cancel.json"}:
             raise ValueError("Invalid computer message name")
         # Keep our own copy: later terminal envelopes must carry the exact request.
@@ -269,7 +328,8 @@ def _read_shared_file(uri, request_id):
         return None
     # This also allows KDE's collision suffix; the signed body remains authority.
     filename = os.path.basename(path)
-    if not filename.startswith(f"navi-auth-response-{request_id}") or not filename.endswith(".json"):
+    if not (filename.startswith(f"navi-auth-response-{request_id}")
+            or filename.startswith(f"navi-auth-enroll-hello-{request_id}")) or not filename.endswith(".json"):
         return None
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
@@ -397,8 +457,39 @@ def _worker(device_id):
         bus.close()
 
 
+def _list_worker():
+    if os.getuid() == 0 or os.geteuid() == 0:
+        raise ValueError("Device listing requires a non-root desktop UID")
+    import dbus
+    bus = dbus.SessionBus(private=True)
+    try:
+        owner = bus.get_name_owner(SERVICE)  # Never auto-start an absent KDE daemon.
+        daemon = bus.get_object(owner, "/modules/kdeconnect", introspect=False)
+        devices = []
+        for device_id in list(daemon.devices(False, True, dbus_interface="org.kde.kdeconnect.daemon", timeout=5))[:64]:
+            device_id = str(device_id)
+            if not DEVICE_PATH_ID.fullmatch(device_id):
+                continue
+            device = bus.get_object(owner, "/modules/kdeconnect/devices/" + device_id, introspect=False)
+            def get(name):
+                return device.Get("org.kde.kdeconnect.device", name,
+                                  dbus_interface="org.freedesktop.DBus.Properties", timeout=5)
+            name = "".join(c for c in str(get("name")) if ord(c) >= 32 and not 0x202a <= ord(c) <= 0x202e
+                           and not 0x2066 <= ord(c) <= 0x2069)[:128]
+            devices.append(dict(id=device_id, name=name or device_id, type=str(get("type"))[:32],
+                                paired=bool(get("isPaired")), reachable=bool(get("isReachable")),
+                                share=bool(device.isPluginEnabled("kdeconnect_share",
+                                                                  dbus_interface="org.kde.kdeconnect.device", timeout=5))))
+        _write_all(1, _encode({"ok": True, "devices": devices}) + b"\n", time.monotonic() + 5)
+    finally:
+        bus.close()
+
+
 if __name__ == "__main__":
     try:
+        if len(sys.argv) == 2 and sys.argv[1] == "--list":
+            _list_worker()
+            raise SystemExit(0)
         if len(sys.argv) != 3 or sys.argv[1] != "--worker":
             raise ValueError("This module is used through KdeConnectPhone")
         _worker(sys.argv[2])

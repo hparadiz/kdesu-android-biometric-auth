@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="@color/navi_background" android:fillViewport="true">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:padding="24dp">
+        <TextView android:id="@+id/setup_title" style="@style/SetupHeading" android:text="Set up KDE Connect" />
+        <TextView android:id="@+id/setup_intro" style="@style/SetupBody" />
+
+        <LinearLayout android:id="@+id/setup_destination" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical">
+            <TextView style="@style/SetupStep" android:text="Send Navi's files to Navi" />
+            <TextView style="@style/SetupBody"
+                android:text="1 · Open KDE Connect and tap your computer.\n2 · Tap ⋮ (top right) → Plugin settings.\n3 · Tap Share and receive (its name or gear) → Customize destination directory.\n4 · In the folder picker, tap ☰ → Navi Authenticator → Use this folder → Allow." />
+            <Button android:id="@+id/setup_open_kdeconnect" style="@style/SetupButton" android:text="Open KDE Connect" />
+            <TextView style="@style/SetupBody"
+                android:text="Signed authentication files then go directly to Navi. Other shared files still go to Downloads, and your existing KDE Connect pairing stays in use." />
+        </LinearLayout>
+
+        <LinearLayout android:id="@+id/setup_downloads" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical" android:visibility="gone">
+            <TextView android:id="@+id/setup_downloads_heading" style="@style/SetupStep" android:text="Or read messages from Downloads" />
+            <TextView android:id="@+id/setup_downloads_status" style="@style/SetupStatus" />
+            <TextView style="@style/SetupBody"
+                android:text="On this Android version Navi can read its computer messages from Downloads instead. It only picks up navi-auth files and deletes them once handled. Keep Navi open while pairing or approving." />
+            <Button android:id="@+id/setup_downloads_allow" style="@style/SetupButton" android:text="Read computer messages from Downloads" />
+        </LinearLayout>
+
+        <TextView style="@style/SetupStep" android:text="Then" />
+        <TextView android:id="@+id/setup_footer" style="@style/SetupBody" />
+        <Button android:id="@+id/setup_done" style="@style/SetupButton" android:text="Return to Navi" />
+    </LinearLayout>
+</ScrollView>

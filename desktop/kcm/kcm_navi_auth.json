@@ -1,0 +1,10 @@
+{
+    "KPlugin": {
+        "Description": "Enroll phones for fingerprint approval and test them",
+        "Icon": "fingerprint",
+        "Name": "Navi Authenticator"
+    },
+    "X-KDE-Keywords": "fingerprint,biometric,phone,kdeconnect,kdesu,authentication,enroll,navi",
+    "X-KDE-System-Settings-Parent-Category": "security-privacy",
+    "X-KDE-Weight": 60
+}

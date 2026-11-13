@@ -12,7 +12,7 @@ public final class NetworkRestartReceiver extends BroadcastReceiver {
         String action = intent.getAction();
         if (!Intent.ACTION_BOOT_COMPLETED.equals(action) && !Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) return;
         // Pairings and transport identity remain in credential-protected storage.
-        if (!context.getSystemService(UserManager.class).isUserUnlocked() || !NetworkService.enabled(context)) return;
+        if (!context.getSystemService(UserManager.class).isUserUnlocked() || !NetworkService.shouldRun(context)) return;
         try {
             context.startForegroundService(new Intent(context, NetworkService.class));
         } catch (IllegalStateException | SecurityException error) {

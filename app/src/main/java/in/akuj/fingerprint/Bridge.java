@@ -26,6 +26,8 @@ final class Bridge {
         developmentEnrollment = (context.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
     }
 
+    File directory() { return directory; }
+
     JSONObject read(String name) throws Exception {
         File file = new File(directory, name);
         if (!file.exists()) return null;
@@ -53,16 +55,26 @@ final class Bridge {
         X509Certificate machine = certificate(envelope.getString("machine_certificate_b64"));
         String machineId = hash(machine.getPublicKey().getEncoded());
         JSONObject pairing = pairings().optJSONObject(machineId);
-        // Release entry points never bootstrap trust from a request's own certificate.
-        if (pairing == null && !developmentEnrollment)
+        // Release entry points never bootstrap trust from a request's own certificate. The only
+        // release bootstrap is a computer key pinned after the user typed its on-screen code.
+        JSONObject pinnedPairing = developmentEnrollment ? null : PairingCode.verified(this);
+        boolean bootstrap = developmentEnrollment || pinnedPairing != null && machineId.equals(pinnedPairing.getString("machine_id"));
+        if (pairing == null && !bootstrap)
             throw new IllegalArgumentException("Unknown computer. Requests require an enrolled computer key.");
         X509Certificate phone = certificate(envelope.getString("phone_certificate_b64"));
         validateCertificate(machine, machine, true);
         validateCertificate(phone, machine, false);
         verifyEnvelope(envelope, machine);
         Challenge request = new Challenge(envelope, machine, phone, allowExpired);
-        if (request.kind.equals("enroll") && !developmentEnrollment)
-            throw new IllegalArgumentException("Computer enrollment requires the development ADB bootstrap.");
+        // A completed enrollment stays valid for its receipt/cancel: the stored pairing already
+        // holds exactly this certificate, so re-reading it grants nothing new.
+        boolean completed = pairing != null && pairing.optString("phone_certificate_b64")
+                .equals(envelope.getString("phone_certificate_b64"));
+        if (request.kind.equals("enroll") && !bootstrap && !completed)
+            throw new IllegalArgumentException("Computer enrollment requires the pairing code shown on the computer.");
+        if (request.kind.equals("enroll") && !completed && pinnedPairing != null && !developmentEnrollment
+                && !pinnedPairing.getString("desktop_device_id").equals(KdeConnectInbox.desktop(request)))
+            throw new IllegalArgumentException("Enrollment must return to the computer that showed the pairing code.");
         if (!Arrays.equals(phone.getPublicKey().getEncoded(), key.publicKey.getEncoded())
                 || !key.id.equals(request.payload.getString("phone_key_id"))
                 || !machineId.equals(request.payload.getString("machine_id"))
@@ -76,7 +88,7 @@ final class Bridge {
             X509Certificate pinned = certificate(pairing.getString("machine_certificate_b64"));
             if (!Arrays.equals(pinned.getPublicKey().getEncoded(), machine.getPublicKey().getEncoded()))
                 throw new IllegalArgumentException("Computer identity does not match the stored pairing.");
-            if (request.kind.equals("authenticate") && !pairing.getString("phone_certificate_b64")
+            if ((request.kind.equals("authenticate") || request.kind.equals("remote-setup")) && !pairing.getString("phone_certificate_b64")
                     .equals(envelope.getString("phone_certificate_b64"))) {
                 throw new IllegalArgumentException("The phone certificate differs from the approved pairing.");
             }
@@ -92,6 +104,7 @@ final class Bridge {
                     .put("machine_certificate_b64", request.envelope.getString("machine_certificate_b64"))
                     .put("phone_certificate_b64", request.envelope.getString("phone_certificate_b64")));
             write("pairings.json", paired);
+            PairingCode.clear(this); // The pinned bootstrap is single-use.
         }
         JSONObject response = new JSONObject().put("request_id", request.id).put("status", "signed")
                 .put("payload_b64", encode(request.bytes)).put("signature_b64", encode(signature))
@@ -150,7 +163,9 @@ final class Bridge {
     }
 
     void reset() throws Exception {
-        for (String name : new String[]{"pairings.json", "pairing.json", "identity.json", "network-identity.json", "request.json", "response.json", "receipt.json", "cancel.json", "kde-cancellations.json"}) {
+        for (String name : new String[]{"pairings.json", "pairing.json", "identity.json", "network-identity.json", "request.json", "response.json", "receipt.json", "cancel.json", "kde-cancellations.json",
+                "remote.json", "request-route.json",
+                PairingCode.FILE, PairingCode.HELLO}) {
             Files.deleteIfExists(new File(directory, name).toPath());
         }
     }
@@ -173,7 +188,7 @@ final class Bridge {
                 .generateCertificate(new ByteArrayInputStream(decode(base64)));
     }
 
-    private static void validateCertificate(X509Certificate cert, X509Certificate root, boolean ca) throws Exception {
+    static void validateCertificate(X509Certificate cert, X509Certificate root, boolean ca) throws Exception {
         cert.checkValidity();
         cert.verify(root.getPublicKey());
         boolean[] usage = cert.getKeyUsage();
