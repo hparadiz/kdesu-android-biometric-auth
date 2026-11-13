@@ -38,6 +38,7 @@ class NaviAuthKcm : public KQuickConfigModule
     Q_PROPERTY(bool authorityConfigured READ authorityConfigured NOTIFY statusChanged)
     Q_PROPERTY(bool authorityMachineMismatch READ authorityMachineMismatch NOTIFY statusChanged)
     Q_PROPERTY(QString authorityProblem READ authorityProblem NOTIFY statusChanged)
+    Q_PROPERTY(bool kdesuWithoutNavi READ kdesuWithoutNavi NOTIFY statusChanged)
     Q_PROPERTY(bool canEnableAdministratorPrompts READ canEnableAdministratorPrompts CONSTANT)
 
 public:
@@ -67,13 +68,16 @@ public:
     bool authorityMachineMismatch() const;
     /** Human-readable reason the root authority cannot be shown, or empty. */
     QString authorityProblem() const;
+    /** Administrator prompts are on for a phone, but the installed kdesu is not the Navi-patched build. */
+    bool kdesuWithoutNavi() const;
     /** pkexec and the installed polkit entry point exist. */
     bool canEnableAdministratorPrompts() const;
 
     Q_INVOKABLE void refresh();
     Q_INVOKABLE void initialize();
     Q_INVOKABLE void startEnrollment(const QString &deviceId);
-    Q_INVOKABLE void sendTest(const QString &deviceId);
+    /** transport: "kdeconnect" (signed files through KDE Connect) or "network" (direct TLS connection). */
+    Q_INVOKABLE void sendTest(const QString &deviceId, const QString &transport = QStringLiteral("kdeconnect"));
     Q_INVOKABLE void revoke(const QString &deviceId);
     /** Asks for the administrator password (polkit) and adds the phone to the protected authority. */
     Q_INVOKABLE void enableAdministratorPrompts(const QString &deviceId);
@@ -124,5 +128,6 @@ private:
     QJsonObject m_authority;
     QString m_revokeAfterAuthority; // device whose local enrollment is removed once root revocation succeeds
     bool m_authorityRevoked = false;
+    bool m_testOverNetwork = false;
     bool m_refreshPending = false;
 };

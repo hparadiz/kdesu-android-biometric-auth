@@ -73,6 +73,12 @@ KCM.ScrollViewKCM {
         }
         Kirigami.InlineMessage {
             Layout.fillWidth: true
+            visible: kcm.kdesuWithoutNavi
+            type: Kirigami.MessageType.Warning
+            text: i18n("kdesu on this computer doesn't use Navi, so administrator prompts never reach your phone. A system update probably replaced the Navi-patched kdesu-gui package; reinstall it (see INSTALL).")
+        }
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
             visible: kcm.authorityProblem.length > 0
             type: Kirigami.MessageType.Information
             text: i18n("Administrator prompt status is unavailable: %1", kcm.authorityProblem)
@@ -222,10 +228,23 @@ KCM.ScrollViewKCM {
                     text: i18nc("@action:button", "Send Test")
                     icon.name: "fingerprint"
                     enabled: !kcm.busy && card.usable
-                    onClicked: kcm.sendTest(card.deviceId)
-                    QQC2.ToolTip.text: i18n("Ask the phone for a fingerprint approval without running anything")
+                    onClicked: testMenu.popup(this, 0, height)
+                    QQC2.ToolTip.text: i18n("Ask the phone for a fingerprint approval without running anything. Choose how the request travels: as signed files through KDE Connect, or over Navi's direct network connection (needs Enable network authentication in Navi → ☰ → Settings).")
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    QQC2.Menu {
+                        id: testMenu
+                        QQC2.MenuItem {
+                            text: i18nc("@action:inmenu", "Through KDE Connect messages")
+                            icon.name: "kdeconnect"
+                            onTriggered: kcm.sendTest(card.deviceId, "kdeconnect")
+                        }
+                        QQC2.MenuItem {
+                            text: i18nc("@action:inmenu", "Over the network (direct)")
+                            icon.name: "network-wireless"
+                            onTriggered: kcm.sendTest(card.deviceId, "network")
+                        }
+                    }
                 }
                 QQC2.Button {
                     text: card.enrolled ? i18nc("@action:button", "Re-enroll") : i18nc("@action:button", "Enroll")

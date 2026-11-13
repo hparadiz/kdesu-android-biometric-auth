@@ -28,9 +28,9 @@ part of the security boundary.
 | Component | Version / purpose |
 | --- | --- |
 | Android application | 0.9.2, API 28+, desk reader mode, code enrollment (KDE Connect, guided destination setup, Downloads on Android 9–10), Settings and Paired computers screens, non-debuggable release |
-| Host CLI and native/Python authority | 0.8.0 with code enrollment over KDE Connect and device selection by name |
-| System Settings page | `kcm_navi_auth` 0.8.0: enroll, status and test per KDE Connect device |
-| KDE patch and Gentoo packages | kdesu-gui 6.7.2-r3 against kde-cli-tools 6.7.2 |
+| Host CLI and native/Python authority | 0.8.1 with code enrollment over KDE Connect, device selection by name, and a warning when kdesu is not Navi-enabled |
+| System Settings page | `kcm_navi_auth` 0.8.1: enroll, status and test (KDE Connect messages or direct network) per KDE Connect device |
+| KDE patch and Gentoo packages | kdesu-gui 6.8.2-r1 against kde-cli-tools 6.8.2 (6.7.2-r3 for Plasma 6.7.2) |
 | Direct Wi-Fi transport | Pinned TLS 1.3; restricted TLS 1.2 on Android 9; TCP 39841 |
 | Optional KDE Connect transport | File sharing on Android 10+, or paired-device IP lookup for direct Wi-Fi |
 | Android CI | Builds debug and release modes with a disposable signing key |

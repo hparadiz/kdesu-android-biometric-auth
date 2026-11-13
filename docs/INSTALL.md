@@ -88,8 +88,11 @@ copy it to the phone and install it there. ADB is not needed after installation.
    and the code box appears.
 5. Navi then shows the enrollment request. Tap **Approve enrollment** and complete
    the biometric prompt. The terminal prints `ENROLLED`; System Settings marks the
-   phone **Enrolled**. Press **Send Test** (or run `python3 host.py authenticate`)
-   to verify an approval.
+   phone **Enrolled**. Press **Send Test → Through KDE Connect messages** (or run
+   `python3 host.py authenticate`). After **Enable network authentication** in Navi
+   (**☰ → Settings**), **Send Test → Over the network (direct)** (or
+   `python3 host.py authenticate --kdeconnect-device ID`) checks the direct route
+   kdesu uses with the LAN transport.
 
 `host.py devices` lists the paired KDE Connect devices and their enrollment, and
 `host.py status` shows the machine and phone key IDs. State lives in
@@ -181,16 +184,16 @@ rather than a copy of the whole KDE source tree. Starting at this repository roo
 ```sh
 repo_dir="$PWD"
 mkdir -p build/kde
-curl --fail --location --output build/kde/kde-cli-tools-6.7.2.tar.xz \
-  https://download.kde.org/stable/plasma/6.7.2/kde-cli-tools-6.7.2.tar.xz
+curl --fail --location --output build/kde/kde-cli-tools-6.8.2.tar.xz \
+  https://download.kde.org/stable/plasma/6.8.2/kde-cli-tools-6.8.2.tar.xz
 printf '%s  %s\n' \
-  f76a520bb2f89a69cf1785885dd58185ff952f484893430928895af277ccc37b \
-  build/kde/kde-cli-tools-6.7.2.tar.xz | sha256sum --check
-tar -xf build/kde/kde-cli-tools-6.7.2.tar.xz -C build/kde
-cd build/kde/kde-cli-tools-6.7.2
-patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.1.80-build-only-kdesu.patch"
-patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.7.2-r2-navi.patch"
-patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.7.2-r3-retry.patch"
+  4b04a8086a3049a24ef9eb7845db3cd36204cc656f95894dea9359e99bd31d1d \
+  build/kde/kde-cli-tools-6.8.2.tar.xz | sha256sum --check
+tar -xf build/kde/kde-cli-tools-6.8.2.tar.xz -C build/kde
+cd build/kde/kde-cli-tools-6.8.2
+patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.8.2-build-only-kdesu.patch"
+patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.8.2-navi.patch"
+patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.8.2-retry.patch"
 cmake -S . -B ../out -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_DOC=OFF -DBUILD_TESTING=ON
 cmake --build ../out --parallel 4
@@ -201,7 +204,7 @@ cd "$repo_dir"
 ```
 
 The first patch restricts the build to kdesu. The second adds the phone integration
-and dialog changes. QtTest must be present; check that CMake actually enables the
+and dialog changes. (Plasma 6.7.2 systems use the `kdesu-gui-6.7.2-r3` patches.) QtTest must be present; check that CMake actually enables the
 two tests. Building previews/tests does not install or grant root privileges.
 The isolated D-Bus session avoids contacting the current desktop during tests.
 The archive digest identifies the upstream input used here; it is not a substitute
@@ -235,12 +238,17 @@ location = /var/db/repos/kdesu-biometric-source/packaging/kde-repo
 masters = gentoo
 auto-sync = no
 EOF
-ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.8.0.ebuild manifest
-ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/kde-misc/navi-auth-kcm/navi-auth-kcm-0.8.0.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.8.1.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/kde-misc/navi-auth-kcm/navi-auth-kcm-0.8.1.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/kde-repo/kde-plasma/kdesu-gui/kdesu-gui-6.8.2-r1.ebuild manifest
+# Keep Plasma upgrades from silently replacing the Navi-patched kdesu with Gentoo's:
+# a newer Plasma then stops with a conflict until a refreshed kdesu-gui ebuild exists.
+install -d -m 0755 /etc/portage/package.mask
+echo 'kde-plasma/kdesu-gui::gentoo' > /etc/portage/package.mask/navi-kdesu
 emerge --pretend --verbose --oneshot \
-  '=sys-auth/navi-auth-0.8.0::navi-auth-local' \
-  '=kde-misc/navi-auth-kcm-0.8.0::navi-auth-local' \
-  '=kde-plasma/kdesu-gui-6.7.2-r3::navi-kde-local'
+  '=sys-auth/navi-auth-0.8.1::navi-auth-local' \
+  '=kde-misc/navi-auth-kcm-0.8.1::navi-auth-local' \
+  '=kde-plasma/kdesu-gui-6.8.2-r1::navi-kde-local'
 ```
 
 Resolve any package/keyword/USE differences deliberately for your system; the
@@ -250,10 +258,14 @@ After accepting the exact plan:
 
 ```sh
 emerge --ask=n --oneshot --usepkg=n --getbinpkg=n --autounmask=n \
-  '=sys-auth/navi-auth-0.8.0::navi-auth-local' \
-  '=kde-misc/navi-auth-kcm-0.8.0::navi-auth-local' \
-  '=kde-plasma/kdesu-gui-6.7.2-r3::navi-kde-local'
+  '=sys-auth/navi-auth-0.8.1::navi-auth-local' \
+  '=kde-misc/navi-auth-kcm-0.8.1::navi-auth-local' \
+  '=kde-plasma/kdesu-gui-6.8.2-r1::navi-kde-local'
 ```
+
+The kdesu-gui version must match your Plasma version. If `host.py authority-status`
+or System Settings says kdesu "doesn't use Navi", a Plasma update replaced it:
+reinstall the Navi-patched kdesu-gui for the current Plasma version.
 
 For existing phone-capable kdesu installations, run authorized administrative
 commands through `kdesu -n --noignorebutton -c '...'`, capturing the child's log

@@ -7,11 +7,14 @@
 #include <QClipboard>
 #include <QDBusConnection>
 #include <QGuiApplication>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFileInfo>
 #include <QProcessEnvironment>
 #include <QStandardPaths>
+
+#include <algorithm>
 
 #include <unistd.h>
 
@@ -194,16 +197,21 @@ void NaviAuthKcm::startEnrollment(const QString &deviceId)
     startTask(QStringLiteral("enroll"), deviceId, {QStringLiteral("enroll"), QStringLiteral("--kdeconnect-device"), deviceId});
 }
 
-void NaviAuthKcm::sendTest(const QString &deviceId)
+void NaviAuthKcm::sendTest(const QString &deviceId, const QString &transport)
 {
     const DeviceModel::Device *device = m_devices->find(deviceId);
     if (!device || !device->enrolled) {
         return;
     }
+    // Network: host.py resolves the phone's current LAN address through KDE Connect and opens Navi's
+    // pinned TLS connection, the same route kdesu uses with the LAN transport.
+    m_testOverNetwork = transport == QLatin1String("network");
     startTask(QStringLiteral("test"), deviceId,
-              {QStringLiteral("authenticate"), QStringLiteral("--kdeconnect-messages"), deviceId, QStringLiteral("--phone-key-id"), device->phoneKeyId,
-               QStringLiteral("--notification-only"), QStringLiteral("--application"), QStringLiteral("System Settings"),
-               QStringLiteral("--operation"), QStringLiteral("Test approval from System Settings")});
+              {QStringLiteral("authenticate"), m_testOverNetwork ? QStringLiteral("--kdeconnect-device") : QStringLiteral("--kdeconnect-messages"),
+               deviceId, QStringLiteral("--phone-key-id"), device->phoneKeyId, QStringLiteral("--notification-only"),
+               QStringLiteral("--application"), QStringLiteral("System Settings"), QStringLiteral("--operation"),
+               m_testOverNetwork ? QStringLiteral("Test network approval from System Settings")
+                                 : QStringLiteral("Test approval from System Settings")});
 }
 
 void NaviAuthKcm::revoke(const QString &deviceId)
@@ -283,6 +291,19 @@ QString NaviAuthKcm::authorityProblem() const
         return i18n("Administrator prompts on this computer are configured for a different account.");
     }
     return {};
+}
+
+bool NaviAuthKcm::kdesuWithoutNavi() const
+{
+    // host.py reports false only when /usr/libexec/kf6/kdesu exists and lacks the Navi protocol marker.
+    const QJsonValue navi = m_authority.value(QStringLiteral("kdesu_navi"));
+    if (!authorityConfigured() || !navi.isBool() || navi.toBool()) {
+        return false;
+    }
+    const QJsonArray phones = m_authority.value(QStringLiteral("phones")).toArray();
+    return std::any_of(phones.begin(), phones.end(), [](const QJsonValue &phone) {
+        return phone.toObject().value(QStringLiteral("enabled")).toBool();
+    });
 }
 
 void NaviAuthKcm::startTask(const QString &task, const QString &deviceId, const QStringList &arguments)
@@ -403,7 +424,9 @@ void NaviAuthKcm::taskExited(int exitCode, QProcess::ExitStatus status)
         if (task == QLatin1String("enroll")) {
             result = i18n("%1 is enrolled. Use “Send test” to try an approval.", m_taskDeviceName);
         } else if (task == QLatin1String("test")) {
-            result = i18n("%1 approved the test with a verified signature.", m_taskDeviceName);
+            result = m_testOverNetwork
+                ? i18n("%1 approved the test over the direct network connection with a verified signature.", m_taskDeviceName)
+                : i18n("%1 approved the test over KDE Connect messages with a verified signature.", m_taskDeviceName);
         } else if (task == QLatin1String("revoke")) {
             result = m_authorityRevoked
                 ? i18n("%1 can no longer approve requests from this account or administrator prompts.", m_taskDeviceName)

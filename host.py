@@ -616,8 +616,14 @@ def approve(args, db, machine_key, root):
             phone = kdeconnect_transport()(sys.modules[__name__], args.kdeconnect_messages, machine_key, root, leaf)
         else:
             resolver = (lambda **options: kdeconnect_endpoint(args.kdeconnect_device, **options)) if args.kdeconnect_device else None
-            phone = NetworkPhone(args.endpoint, machine_key, root, leaf, resolver)
-        phone.check()
+            try:
+                phone = NetworkPhone(args.endpoint, machine_key, root, leaf, resolver)
+                phone.check()
+            except (OSError, ConnectionError, TimeoutError) as error:
+                raise ConnectionError("Phone not reachable over the network. In Navi, ☰ → Settings → Enable network "
+                                      f"authentication, and keep the phone on the same network as this computer. ({error})") from error
+        if args.kdeconnect_messages:
+            phone.check()
     else:
         phone = Phone(args.serial)
     identity = phone.identity()
@@ -799,6 +805,24 @@ def authority_request(event, **fields):
     return reply, None
 
 
+KDESU = Path("/usr/libexec/kf6/kdesu")
+KDESU_MARKER = "navi-auth-exec/v1"
+
+
+def kdesu_navi_enabled(path=KDESU):
+    """True when the installed kdesu carries the Navi patch, False when it does not, None if absent.
+
+    The patch embeds its protocol name as a QStringLiteral (UTF-16LE); an unpatched kdesu never calls
+    the authority, so administrator prompts silently fall back to the password dialog.
+    """
+    try:
+        with open(path, "rb") as binary:
+            data = binary.read(4 * 1024 * 1024)
+    except OSError:
+        return None
+    return KDESU_MARKER.encode("utf-16-le") in data or KDESU_MARKER.encode() in data
+
+
 def authority_status():
     reply, error = authority_request("status")
     if reply is None:
@@ -807,7 +831,8 @@ def authority_status():
         return
     status = {name: reply.get(name) for name in ("configured", "valid", "reason", "account_matches", "enabled",
                                                  "machine_key_id", "phones") if name in reply}
-    emit("authority", available=True, **status)
+    kdesu_navi = kdesu_navi_enabled()
+    emit("authority", available=True, kdesu_navi=kdesu_navi, **status)
     if JSON_MODE:
         return
     if not status.get("configured"):
@@ -823,6 +848,9 @@ def authority_status():
             state = "enabled" if phone.get("enabled") else "revoked"
             print(f"  {phone['phone_key_id']} · {state} · {phone.get('transport')} · {phone.get('kdeconnect_device') or '-'}"
                   f" · certificate expires {(phone.get('certificate_expires') or '?')[:10]}")
+        if kdesu_navi is False and any(phone.get("enabled") for phone in status.get("phones", [])):
+            print(f"WARNING: {KDESU} is not the Navi-patched kdesu, so administrator prompts never reach the phone.")
+            print("  A system update probably replaced kde-plasma/kdesu-gui; reinstall the Navi-patched build (see INSTALL).")
 
 
 def show_status(root):
