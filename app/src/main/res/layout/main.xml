@@ -30,6 +30,23 @@
             <TextView style="@style/SetupBody"
                 android:text="Start fingerprint prompts automatically for paired computers. Keep Navi open and leave the rear sensor within reach. Your fingerprint is still required for every approval. The screen stays awake while Navi is open." />
         </LinearLayout>
+        <LinearLayout android:id="@+id/pairing_panel" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical" android:background="@drawable/panel" android:layout_marginTop="16dp" android:visibility="gone">
+            <TextView style="@style/SetupHeading" android:textSize="20sp" android:text="Pair with a computer" />
+            <TextView android:id="@+id/pairing_machine" style="@style/SetupBody" android:accessibilityLiveRegion="polite" />
+            <EditText android:id="@+id/pairing_code" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="14dp" android:padding="14dp" android:background="@drawable/request_field"
+                android:hint="ABCD-EFGH" android:textColorHint="@color/navi_muted" android:textColor="@color/navi_text"
+                android:fontFamily="monospace" android:textSize="24sp" android:letterSpacing="0.15" android:gravity="center"
+                android:maxLength="9" android:singleLine="true" android:importantForAutofill="no"
+                android:inputType="textCapCharacters|textNoSuggestions|textVisiblePassword" android:imeOptions="actionDone" />
+            <Button android:id="@+id/pairing_confirm" android:layout_width="match_parent" android:layout_height="52dp"
+                android:layout_marginTop="16dp" android:text="Confirm code" android:textAllCaps="false"
+                android:textSize="16sp" android:fontFamily="sans-serif-medium"
+                android:background="@drawable/primary_button" android:backgroundTint="@color/action_background"
+                android:textColor="@color/action_text" android:stateListAnimator="@null" />
+            <Button android:id="@+id/pairing_open" style="@style/SetupButton" android:text="Open pairing offer…" android:visibility="gone" />
+        </LinearLayout>
         <LinearLayout android:id="@+id/machine_badge" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:orientation="horizontal" android:gravity="center_vertical" android:visibility="gone"
             android:background="@drawable/machine_panel" android:layout_marginTop="16dp">
@@ -113,12 +130,21 @@
             <TextView android:id="@+id/background_summary" style="@style/SetupBody" android:text="Set up notifications and background battery use" />
             <Button android:id="@+id/network_toggle" style="@style/SetupButton" android:text="Enable network authentication" />
             <Button android:id="@+id/background_setup" style="@style/SetupButton" android:text="Background setup &amp; instructions" />
+            <LinearLayout android:id="@+id/downloads_access" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:visibility="gone">
+                <TextView style="@style/SetupBody"
+                    android:text="KDE Connect on this Android version saves computer messages to Downloads. Allow Navi to read them there; it only picks up navi-auth files and deletes them once handled." />
+                <Button android:id="@+id/downloads_allow" style="@style/SetupButton" android:text="Read computer messages from Downloads" />
+            </LinearLayout>
         </LinearLayout>
         <TextView android:id="@+id/kdeconnect_status" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="16dp" android:text="Use your existing KDE Connect pairing" android:textSize="13sp" android:textColor="@color/navi_muted" />
         <Button android:id="@+id/kdeconnect_setup" style="?android:attr/borderlessButtonStyle"
             android:layout_width="match_parent" android:layout_height="48dp"
             android:text="Set up KDE Connect" android:textSize="14sp" android:textAllCaps="false" android:textColor="@color/navi_cyan" />
+        <Button android:id="@+id/pair_computer" style="?android:attr/borderlessButtonStyle"
+            android:layout_width="match_parent" android:layout_height="48dp"
+            android:text="Pair a computer…" android:textSize="14sp" android:textAllCaps="false" android:textColor="@color/navi_cyan" />
         <Button android:id="@+id/details_toggle" style="?android:attr/borderlessButtonStyle"
             android:layout_width="match_parent" android:layout_height="48dp" android:layout_marginTop="16dp"
             android:text="Show connection details" android:textSize="14sp" android:textAllCaps="false" android:textColor="@color/navi_cyan" />

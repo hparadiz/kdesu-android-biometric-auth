@@ -47,16 +47,46 @@ The APK update-signing key is a **fourth, separate identity**. It determines who
 can supply compatible app updates, not who can approve a command.
 
 The machine issues a one-year non-CA X.509 certificate for the enrolled phone
-public key; its own CA certificate lasts ten years. Initial enrollment uses
-authorized ADB plus biometric proof of possession. The phone pins the computer
+public key; its own CA certificate lasts ten years. The phone pins the computer
 key, and the computer keeps an explicit approved-phone record. An unknown machine
 cannot enroll itself over the LAN listener.
 
-Release builds also enforce this in the shared request validator: unknown
-computer keys and all enrollment requests are rejected before the request is
-shown for approval, regardless of delivery route. Enrollment remains available
-only in a debuggable build through the documented trusted ADB bootstrap. A
-valid signature from an unknown key does not establish trust.
+### Code enrollment (release builds)
+
+Initial trust comes from a one-time code that the user reads on the computer and
+types into the phone, carried over an existing KDE Connect pairing:
+
+1. `host.py enroll` (or the System Settings page) shares a machine-signed
+   `enroll-offer` with the selected KDE Connect device and shows an 8-character
+   Crockford-base32 code (40 bits, 10-minute lifetime). The offer carries the
+   machine CA certificate, host name, the desktop's KDE Connect ID and
+   `HMAC-SHA256(code, "navi-enroll-offer/v1\n" || payload)`.
+2. The phone stores up to four unexpired offers but trusts none of them. When the
+   typed code matches one offer's tag (five wrong attempts drop an offer), the
+   phone pins that machine key and desktop route for the offer's lifetime and
+   shares back an `enroll-hello`: its public key and key ID tagged with the same
+   code under the `navi-enroll-hello/v1` label.
+3. The computer accepts the hello only from the selected device, verifies the tag
+   and key ID, issues the phone certificate and sends the normal `enroll` request
+   bound to the `kdeconnect-share` transport.
+4. `Bridge.validate` accepts an unknown machine or an `enroll` request only when
+   it matches the pinned key and returns to the same desktop route. The usual
+   biometric signature then proves possession; the pin is deleted on success.
+
+Offers from other paired devices or apps cannot match the code the user is
+reading, and all messages stay inside KDE Connect's paired channel, so the short
+code is not exposed to offline guessing. Delivery to the phone is automatic with
+Navi as the KDE Connect destination (Android 10+). Otherwise the user opens the
+saved offer with Navi or the file picker (offers only), and on Android 9–10 Navi
+can import recent `navi-auth-*.json` files from `Download/` while it is open. On
+Android 9 the documents provider only serves Navi's outgoing replies and is not
+offered as a destination folder.
+
+Release builds reject every other enrollment in the shared validator, before the
+request is shown, regardless of delivery route. A debuggable build still accepts
+the original trusted ADB bootstrap (`host.py enroll --serial`), kept as a
+fallback for Android 9 devices. A valid signature from an unknown key never
+establishes trust on its own.
 
 Android uses `BiometricPrompt.CryptoObject(Signature)` with a per-operation strong
 biometric requirement. This is Android biometric strength selection, not a
@@ -133,6 +163,17 @@ The installed snapshot lives in `/etc/navi-auth/config.json` and
 `/var/lib/navi-auth/`, root-owned 0700, with credentials mode 0600. The execution
 database and `last-execution.json` store approval/receipt evidence;
 `commands.log` receives command diagnostics. These can contain sensitive commands.
+
+The setuid helper also accepts two non-executing requests from the configured
+desktop account, each a single line on the same pipe protocol: `status` returns a
+read-only summary of the protected configuration (phone key IDs, enablement,
+transport, KDE Connect route and certificate expiry; nothing for other accounts),
+and `revoke` disables the caller's own KDE Connect device. `host.py
+authority-status` and `authority-revoke` and the System Settings page use them.
+Neither takes the authority lock, and neither can add or enable a phone. Enabling
+goes through polkit (`in.akuj.navi-auth.configure-authority`, `auth_admin`) to the
+fixed `/usr/libexec/navi-auth/configure` wrapper, i.e. the same configurator an
+administrator would run, limited to the requesting user's own account and state.
 
 `host.py revoke` only changes development state. The installed configurator's
 `--revoke` disables all protected phones, or one when combined with

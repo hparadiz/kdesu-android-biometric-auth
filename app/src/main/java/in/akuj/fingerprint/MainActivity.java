@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.app.KeyguardManager;
 import android.app.NotificationManager;
 import android.Manifest;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -13,18 +14,21 @@ import android.graphics.Color;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
 import android.hardware.fingerprint.FingerprintManager;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -36,10 +40,21 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final String TAG = "PhoneAuthenticator";
+    private static final int PICK_OFFER = 21, DOWNLOADS_PERMISSION = 22;
+    private static final String PAIRING_HELP = "Start on the computer: open System Settings → Navi Authenticator, "
+            + "pick this phone and press Enroll (or run host.py enroll in a terminal). The computer shows an "
+            + "8-character code, and a code box appears here.\n\nNo code box? KDE Connect saved the offer to "
+            + "Downloads instead. Tap Open pairing offer… and choose the navi-auth-enroll-offer-….json file, or tap "
+            + "KDE Connect's file notification and open it with Navi.";
+    private long lastDownloadScan;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView status, detail, challenge, keyInfo;
-    private Button authenticate, enroll, reset, proof;
+    private Button authenticate, enroll, reset, proof, pairingConfirm, pairingOpen;
+    private EditText pairingCode;
+    private View pairingPanel;
+    private String shownPairing;
+    private boolean pairingBusy;
     private Switch deskReader;
     private SharedPreferences deskSettings;
     private Bridge bridge;
@@ -56,6 +71,8 @@ public final class MainActivity extends Activity {
             if (stopped) return;
             updateNetworkStatus();
             if (key != null && !busy) pollComputer();
+            scanDownloads();
+            updatePairing();
             offerBackgroundSetup();
             handler.postDelayed(this, 1000);
         }
@@ -118,12 +135,26 @@ public final class MainActivity extends Activity {
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Reset", (dialog, which) -> resetKey()).show());
         proof.setOnClickListener(v -> showProof());
+        pairingPanel = findViewById(R.id.pairing_panel);
+        pairingCode = findViewById(R.id.pairing_code);
+        pairingConfirm = findViewById(R.id.pairing_confirm);
+        pairingConfirm.setOnClickListener(v -> confirmPairing());
+        pairingCode.setOnEditorActionListener((view, action, event) -> { confirmPairing(); return true; });
+        pairingOpen = findViewById(R.id.pairing_open);
+        pairingOpen.setOnClickListener(v -> openOfferPicker());
+        findViewById(R.id.pair_computer).setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setTitle("Pair a computer")
+                .setMessage(PAIRING_HELP)
+                .setNegativeButton("Close", null)
+                .setPositiveButton("Open pairing offer…", (dialog, which) -> openOfferPicker()).show());
+        findViewById(R.id.downloads_allow).setOnClickListener(v -> requestPermissions(new String[]{
+                Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE}, DOWNLOADS_PERMISSION));
         findViewById(R.id.network_toggle).setOnClickListener(v -> toggleNetwork());
         findViewById(R.id.background_setup).setOnClickListener(v ->
                 startActivity(new Intent(this, BackgroundSetupActivity.class)));
         findViewById(R.id.kdeconnect_setup).setOnClickListener(v -> new AlertDialog.Builder(this)
                 .setTitle("Connect through KDE Connect")
-                .setMessage("In KDE Connect, open the file-sharing settings and choose a custom destination folder. Select Navi Authenticator from the folder picker’s side menu, then Use this folder.\n\nSigned authentication files go directly to Navi. Other shared files still go to Downloads. Your existing pairing stays in use.")
+                .setMessage("In KDE Connect, open the file-sharing settings and choose a custom destination folder. Select Navi Authenticator from the folder picker’s side menu, then Use this folder.\n\nSigned authentication files go directly to Navi. Other shared files still go to Downloads. Your existing pairing stays in use.\n\nWithout this setting, pairing offers land in Downloads: open the received file with Navi, or use Pair a computer… → Open pairing offer….")
                 .setNegativeButton("Close", null).setPositiveButton("Open KDE Connect", (dialog, which) -> {
                     Intent open = getPackageManager().getLaunchIntentForPackage(KdeConnectInbox.PACKAGE);
                     if (open != null) startActivity(open);
@@ -153,6 +184,76 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
+        updateDownloadsAccess();
+    }
+
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (focused) {
+            lastDownloadScan = 0;
+            scanDownloads();
+        }
+    }
+
+    /** Android 9-10: pick up KDE Connect files saved to Download/ (throttled; runs while Navi is visible). */
+    private void scanDownloads() {
+        if (Build.VERSION.SDK_INT > 29 || stopped || SystemClock.elapsedRealtime() - lastDownloadScan < 3000) return;
+        if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) return;
+        lastDownloadScan = SystemClock.elapsedRealtime();
+        worker.execute(() -> {
+            if (KdeConnectInbox.importDownloads(getApplicationContext()) > 0)
+                runOnUiThread(() -> { if (!isDestroyed()) updatePairing(); });
+        });
+    }
+
+    private void updateDownloadsAccess() {
+        boolean needed = Build.VERSION.SDK_INT <= 29
+                && checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED;
+        findViewById(R.id.downloads_access).setVisibility(needed ? View.VISIBLE : View.GONE);
+    }
+
+    @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(code, permissions, results);
+        if (code != DOWNLOADS_PERMISSION) return;
+        updateDownloadsAccess();
+        lastDownloadScan = 0;
+        scanDownloads();
+    }
+
+    private void openOfferPicker() {
+        Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/json", "text/plain", "application/octet-stream"})
+                .putExtra(DocumentsContract.EXTRA_INITIAL_URI,
+                        Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload"));
+        try {
+            startActivityForResult(pick, PICK_OFFER);
+        } catch (ActivityNotFoundException missing) {
+            setStatus("File picker unavailable", "Open the navi-auth-enroll-offer file from KDE Connect's notification instead.");
+        }
+    }
+
+    @Override protected void onActivityResult(int code, int result, Intent data) {
+        super.onActivityResult(code, result, data);
+        if (code != PICK_OFFER || result != RESULT_OK || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
+        worker.execute(() -> {
+            String error = null;
+            try {
+                KdeConnectInbox.receiveOfferFile(getApplicationContext(), KdeConnectInbox.readDocument(this, uri));
+            } catch (IllegalArgumentException invalid) {
+                error = invalid.getMessage();
+            } catch (Exception failure) {
+                Log.w(TAG, "Pairing offer import failed", failure);
+                error = "This pairing offer could not be used. Start pairing again on the computer.";
+            }
+            String message = error;
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                if (message != null) setStatus("Pairing offer not accepted", message);
+                updatePairing();
+                if (message == null && pairingCode.getVisibility() == View.VISIBLE) pairingCode.requestFocus();
+            });
+        });
     }
 
     @Override protected void onPause() {
@@ -208,6 +309,7 @@ public final class MainActivity extends Activity {
                 ? "Approve enrollment" : "Approve request");
         enroll.setVisibility(availability == BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED ? View.VISIBLE : View.GONE);
         reset.setEnabled(active == null && !busy);
+        if (pairingConfirm != null) pairingConfirm.setEnabled(key != null && ready && !busy && !pairingBusy && active == null);
         deskReader.setEnabled(active == null && !busy);
         findViewById(R.id.network_toggle).setEnabled(key != null && ready && !busy && active == null);
         findViewById(R.id.background_setup).setEnabled(!busy && active == null);
@@ -234,7 +336,7 @@ public final class MainActivity extends Activity {
                     showPairedComputers(paired);
                     setStatus(paired.length() > 0 ? "Waiting for computer" : "Ready for enrollment",
                             paired.length() > 0 ? "Start an authentication request on your computer."
-                                    : "Enroll this phone from your computer to approve its public key.");
+                                    : "On your computer, start pairing in System Settings → Navi Authenticator (or host.py enroll), then enter the code it shows.");
                     refresh();
                 });
             } catch (Exception error) {
@@ -353,6 +455,96 @@ public final class MainActivity extends Activity {
                 setStatus("Waiting for computer", "The previous request expired. Start a new request on your computer.");
             else report(error);
         }
+    }
+
+    /** Shows pending pairing offers (untrusted until the typed code matches) or a verified pairing. */
+    private void updatePairing() {
+        if (pairingPanel == null) return;
+        try {
+            JSONObject verified = key == null ? null : PairingCode.verified(bridge);
+            JSONObject offer = key == null || verified != null ? null : PairingCode.latestOffer(bridge);
+            boolean enrolling = pending != null || awaiting != null || active != null;
+            if (verified != null && !enrolling) {
+                String id = verified.getString("machine_id");
+                ((TextView) findViewById(R.id.pairing_machine)).setText("Code accepted for " + verified.getString("machine_name")
+                        + " · " + id.substring(0, 4) + " " + id.substring(4, 8) + " " + id.substring(8, 12)
+                        + "\nWaiting for its pairing request. If nothing arrives, send the confirmation again.");
+                pairingCode.setVisibility(View.GONE);
+                pairingOpen.setVisibility(View.GONE);
+                pairingConfirm.setVisibility(View.VISIBLE);
+                pairingConfirm.setText("Send confirmation again");
+                pairingPanel.setVisibility(View.VISIBLE);
+                shownPairing = "verified:" + verified.getString("session_id");
+            } else if (offer != null && !enrolling) {
+                String session = offer.getString("session_id");
+                if (!session.equals(shownPairing)) {
+                    String id = offer.getString("machine_id");
+                    ((TextView) findViewById(R.id.pairing_machine)).setText(offer.getString("machine_name") + " · "
+                            + id.substring(0, 4) + " " + id.substring(4, 8) + " " + id.substring(8, 12)
+                            + "\nEnter the 8-character code shown on that computer. Only pair computers you are using right now.");
+                    pairingCode.setText("");
+                    pairingCode.setVisibility(View.VISIBLE);
+                    pairingOpen.setVisibility(View.GONE);
+                    pairingConfirm.setVisibility(View.VISIBLE);
+                    pairingConfirm.setText("Confirm code");
+                    shownPairing = session;
+                }
+                pairingPanel.setVisibility(View.VISIBLE);
+            } else if (key != null && !enrolling && bridge.pairings().length() == 0) {
+                // First run: explain that pairing starts on the computer, and offer the Downloads fallback.
+                if (!"idle".equals(shownPairing)) {
+                    ((TextView) findViewById(R.id.pairing_machine)).setText(PAIRING_HELP);
+                    pairingCode.setVisibility(View.GONE);
+                    pairingConfirm.setVisibility(View.GONE);
+                    pairingOpen.setVisibility(View.VISIBLE);
+                    shownPairing = "idle";
+                }
+                pairingPanel.setVisibility(View.VISIBLE);
+            } else {
+                pairingPanel.setVisibility(View.GONE);
+                shownPairing = null;
+            }
+        } catch (Exception error) {
+            Log.w(TAG, "Pairing state unavailable", error);
+            pairingPanel.setVisibility(View.GONE);
+        }
+    }
+
+    private void confirmPairing() {
+        if (key == null || pairingBusy || busy || active != null || stopped) return;
+        SigningKey signingKey = key;
+        boolean resend = pairingCode.getVisibility() != View.VISIBLE;
+        String typed = pairingCode.getText().toString();
+        pairingBusy = true;
+        refresh();
+        worker.execute(() -> {
+            try {
+                JSONObject verified = resend ? PairingCode.verified(bridge) : PairingCode.confirm(this, typed, signingKey);
+                if (verified == null) throw new IllegalStateException("The pairing code expired. Start pairing again on the computer.");
+                runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    pairingBusy = false;
+                    refresh();
+                    try {
+                        showMachine(verified.getString("machine_name"), verified.getString("machine_id"), "New pairing");
+                        setStatus("Code accepted", "Sending this phone’s public key to " + verified.getString("machine_name")
+                                + ". Approve the pairing request that follows with your fingerprint.");
+                        KdeConnectInbox.sendHello(this, verified);
+                    } catch (Exception error) { report(error); }
+                    shownPairing = null;
+                    updatePairing();
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    pairingBusy = false;
+                    refresh();
+                    shownPairing = null;
+                    updatePairing();
+                    setStatus("Code not accepted", error.getMessage() == null ? "Try again." : error.getMessage());
+                });
+            }
+        });
     }
 
     private void begin() {

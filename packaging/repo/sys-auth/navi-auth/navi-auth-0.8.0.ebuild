@@ -15,6 +15,7 @@ RDEPEND="dev-lang/python:3.14
     dev-python/dbus-python[python_targets_python3_14]
     dev-python/pygobject[python_targets_python3_14]
     kde-misc/kdeconnect
+    sys-auth/polkit
     dev-qt/qttools:6[qdbus]"
 
 src_compile() {
@@ -26,5 +27,9 @@ src_install() {
     exeinto /usr/libexec/navi-auth
     doexe "${FILESDIR}/rootauth.py" "${FILESDIR}/host.py" "${FILESDIR}/configure-authority.py" "${FILESDIR}/kdeconnect_transport.py"
     doexe authorize
+    # polkit entry point for "Administrator prompts" in System Settings.
+    newexe "${FILESDIR}/navi-auth-configure" configure
+    insinto /usr/share/polkit-1/actions
+    doins "${FILESDIR}/in.akuj.navi-auth.policy"
     fperms 4755 /usr/libexec/navi-auth/authorize
 }

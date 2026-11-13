@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- SPDX-License-Identifier: MIT -->
+<policyconfig>
+  <vendor>Navi Authenticator</vendor>
+  <action id="in.akuj.navi-auth.configure-authority">
+    <description>Let a phone approve administrator prompts</description>
+    <message>Authentication is required to let your enrolled phone approve administrator (kdesu) prompts on this computer</message>
+    <icon_name>fingerprint</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <!-- Always ask; trust changes are never cached. -->
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/navi-auth/configure</annotate>
+  </action>
+</policyconfig>

@@ -19,7 +19,7 @@
   dependencies listed in the ebuild. The installed baseline is Gentoo; this is
   not a universal install script for older KDE distributions.
 
-## 1. Build a new phone's enrollment APK
+## 1. Build the APK
 
 ```sh
 git clone https://github.com/hparadiz/kdesu-android-biometric-auth.git
@@ -28,27 +28,80 @@ export ANDROID_HOME="$HOME/Android/Sdk"
 # Set JAVA_HOME to an installed JDK if Java is not already on PATH.
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
   'platforms;android-34' 'build-tools;34.0.0' 'platform-tools'
-./build.sh debug
+./build.sh release --new-key   # first installation only; later: ./build.sh release
 ```
 
 SDK installation requires accepting Google's SDK licenses; the build itself is
 offline once these components are installed. See the official
 [sdkmanager documentation](https://developer.android.com/tools/sdkmanager).
 
-On the first explicit debug build, `build.sh` creates `build/debug.keystore` and
-uses it to sign the APK. **Keep this private key and back it up securely.** The
-historical script uses the standard development alias/password, so filesystem
-protection is what protects that file. Do not commit it or put it in CI artifacts.
-Both debug and release builds currently use this same key to preserve updates.
-Its name does not control the APK's debuggable flag. A separate production signing
-workflow and protected signing-key custody are still needed for wider deployment.
+`--new-key` creates `build/debug.keystore` and refuses to run if one exists.
+**Keep this private key and back it up securely.** The historical script uses the
+standard development alias/password, so filesystem protection is what protects
+that file. Do not commit it or put it in CI artifacts. Debug and release builds
+use this same key to preserve updates; its name does not control the APK's
+debuggable flag. A separate production signing workflow and protected
+signing-key custody are still needed for wider deployment.
 
-## 2. Connect ADB and enroll
+Install the APK with `./install.sh SERIAL release` over USB/wireless debugging, or
+copy it to the phone and install it there. ADB is not needed after installation.
 
-Use a trusted computer and authorize USB debugging. Android 11+ also supports
-Wireless debugging with **Pair device with pairing code**:
+## 2. Enroll the phone
+
+### With a pairing code (release build)
+
+1. Pair the phone with this computer in KDE Connect and leave file sharing enabled.
+2. In Navi, tap **Set up KDE Connect** and choose **Navi Authenticator** as KDE
+   Connect's destination folder. Open Navi once so it prepares its signing key.
+3. On the computer, either open **System Settings → Security & Privacy → Navi
+   Authenticator**, press **Create Identity** once and then **Enroll** next to the
+   phone, or use the terminal:
+
+   ```sh
+   python3 host.py init
+   python3 host.py enroll                         # asks when several phones are available
+   python3 host.py enroll --kdeconnect-device "Pixel 9 Pro"   # or select by name / ID
+   ```
+
+4. The computer shows a code such as `K7QM-3XPA`. Navi shows **Pair with a
+   computer** with the computer's name and fingerprint; check them, type the code
+   and tap **Confirm code**. KDE Connect returns the phone's key to the computer.
+
+   **No code box?** Then KDE Connect saved the offer to the phone's Downloads
+   (step 2 was skipped). Either tap KDE Connect's "file received" notification and
+   open it with **Navi pairing offer**, or in Navi tap **Pair a computer… → Open
+   pairing offer…** and choose the `navi-auth-enroll-offer-….json` file the
+   computer names. Only pairing offers are accepted this way, and they still need
+   the code. Navi shows the same instructions until a computer is paired.
+5. Navi then shows the enrollment request. Tap **Approve enrollment** and complete
+   the biometric prompt. The terminal prints `ENROLLED`; System Settings marks the
+   phone **Enrolled**. Press **Send Test** (or run `python3 host.py authenticate`)
+   to verify an approval.
+
+`host.py devices` lists the paired KDE Connect devices and their enrollment, and
+`host.py status` shows the machine and phone key IDs. State lives in
+`$XDG_STATE_HOME/navi-auth` (normally `~/.local/state/navi-auth`); an existing
+`.state` directory beside `host.py` keeps being used. The code expires after ten
+minutes, and five wrong entries discard it.
+
+### Android 9–10 without ADB (e.g. Nexus 6P)
+
+KDE Connect on these versions saves received files to `Download/`. In Navi tap
+**Read computer messages from Downloads** and allow storage access (only
+requested on Android 9–10). Keep Navi open during enrollment: it checks
+`Download/` when it opens, regains focus and every few seconds while visible,
+handles recent `navi-auth-*.json` files exactly like KDE Connect deliveries, and
+deletes them. Enroll as above. Afterwards configure kdesu with the LAN transport
+(`--transport lan --kdeconnect-device …`), which does not depend on files.
+
+### ADB fallback (debug build, Android 9 such as the Nexus 6P)
+
+Android 9 cannot receive KDE Connect messages in Navi, so it keeps the original
+bootstrap. Use a trusted computer and authorize USB debugging. Android 11+ also
+supports Wireless debugging with **Pair device with pairing code**:
 
 ```sh
+./build.sh debug
 adb pair PHONE_IP:PAIRING_PORT
 adb connect PHONE_IP:CONNECTION_PORT
 adb devices -l
@@ -63,9 +116,11 @@ computer enrollment request, tap Approve and complete the biometric operation.
 The host must print `ENROLLED`. Save the IDs from `python3 host.py status`.
 
 This bootstrap uses ADB `run-as` to access the debug app's private mailbox. New
-enrollment directly into a non-debuggable release is **rejected by the request
-validator**, including requests to replace an existing pairing. Existing enrollment
-does not need to be repeated for compatible updates.
+enrollment into a non-debuggable release without a matching pairing code is
+**rejected by the request validator**, including requests to replace an existing
+pairing. Existing enrollment does not need to be repeated for compatible updates.
+
+### Network authentication
 
 On the phone, tap **Enable network authentication**, approve its one-time transport
 key binding, and complete [background setup](BACKGROUND.md). Wait for **Ready on
@@ -165,9 +220,11 @@ location = /var/db/repos/kdesu-biometric-source/packaging/kde-repo
 masters = gentoo
 auto-sync = no
 EOF
-ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.7.2.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.8.0.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/kde-misc/navi-auth-kcm/navi-auth-kcm-0.8.0.ebuild manifest
 emerge --pretend --verbose --oneshot \
-  '=sys-auth/navi-auth-0.7.2::navi-auth-local' \
+  '=sys-auth/navi-auth-0.8.0::navi-auth-local' \
+  '=kde-misc/navi-auth-kcm-0.8.0::navi-auth-local' \
   '=kde-plasma/kdesu-gui-6.7.2-r3::navi-kde-local'
 ```
 
@@ -178,7 +235,8 @@ After accepting the exact plan:
 
 ```sh
 emerge --ask=n --oneshot --usepkg=n --getbinpkg=n --autounmask=n \
-  '=sys-auth/navi-auth-0.7.2::navi-auth-local' \
+  '=sys-auth/navi-auth-0.8.0::navi-auth-local' \
+  '=kde-misc/navi-auth-kcm-0.8.0::navi-auth-local' \
   '=kde-plasma/kdesu-gui-6.7.2-r3::navi-kde-local'
 ```
 
@@ -194,11 +252,14 @@ user-writable build directory or point it at user-writable Python code.
 ## 6. Configure the protected enrollment
 
 In the administrator shell, substitute the enrolled user's path, numeric UID,
-paired KDE Connect device ID and both full key IDs reported by `host.py status`:
+paired KDE Connect device ID and both full key IDs reported by `host.py status`
+(System Settings shows the complete command under **Use for Administrator
+Prompts…**). Use the state directory printed by `host.py --json status`; older
+checkouts keep `.state` beside `host.py`:
 
 ```sh
 /usr/bin/python3.14 -I /usr/libexec/navi-auth/configure-authority.py \
-  --source-state /home/alice/kdesu-android-biometric-auth/.state \
+  --source-state /home/alice/.local/state/navi-auth \
   --uid 1000 --transport lan --kdeconnect-device PAIRED_DEVICE_ID \
   --phone-key-id PHONE_KEY_SHA256 --machine-key-id MACHINE_KEY_SHA256
 /usr/bin/python3.14 -I /usr/libexec/navi-auth/rootauth.py --check
@@ -220,15 +281,16 @@ available for installations without KDE Connect discovery.
 ### Add another enrolled phone
 
 Enroll the additional phone with the **same machine identity/state directory**
-using the debug ADB bootstrap, then restore its release app and enable its network
-connection. Select the intended certificate with `--phone-key-id` when using the
+using the pairing code (or the ADB fallback), then enable its network connection.
+In System Settings, **Use for Administrator Prompts…** in a phone's menu shows the
+exact configurator command below for that phone. Select the intended certificate with `--phone-key-id` when using the
 host CLI after multiple phones have been enrolled.
 
 From the administrator shell, add the reviewed phone without replacing the others:
 
 ```sh
 /usr/bin/python3.14 -I /usr/libexec/navi-auth/configure-authority.py \
-  --source-state /home/alice/kdesu-android-biometric-auth/.state \
+  --source-state /home/alice/.local/state/navi-auth \
   --uid 1000 --transport lan --endpoint SECOND_PHONE_IP:39841 \
   --phone-key-id SECOND_PHONE_KEY_SHA256 --machine-key-id MACHINE_KEY_SHA256 \
   --add-phone
@@ -280,6 +342,21 @@ To disable protected phone execution, an administrator runs:
 This prevents new requests and rejects a configuration change observed before
 commit. It cannot undo an already committed command. `host.py revoke PHONE_KEY`
 only affects development state. Phone key reset affects all paired computers.
+
+The configured desktop account can also disable its own phone without a password,
+and can check what the installed authority accepts for it:
+
+```sh
+python3 host.py authority-status                 # read-only; uses the installed setuid helper
+python3 host.py authority-revoke KDECONNECT_DEVICE_ID
+```
+
+System Settings → Navi Authenticator shows an **Administrator prompts** switch on
+each enrolled phone. Turning it on asks for the administrator password (polkit action
+`in.akuj.navi-auth.configure-authority`, which runs `/usr/libexec/navi-auth/configure`,
+a fixed wrapper around the configurator above with `--transport kdeconnect-share
+--add-phone`). Turning it off, or **Remove Enrollment**, disables the phone without a
+password.
 
 Remove `sys-auth/navi-auth` with your package manager to remove its executable;
 review retained root-private state separately. Restore the distribution's kdesu

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 from types import SimpleNamespace
 
 
@@ -52,6 +53,12 @@ def main():
             return
         if not all((args.source_state, args.uid, args.phone_key_id, args.machine_key_id)):
             raise SystemExit("Explicit source, desktop UID, and both key IDs are required")
+        requester = os.environ.get("PKEXEC_UID")
+        if requester is not None:
+            # Started through polkit from a desktop session: the admin password authorizes only
+            # the requesting user's own account and private state, not anyone else's.
+            if not requester.isdecimal() or int(requester) != args.uid:
+                raise SystemExit("The desktop account must be the user who requested this change")
         account = authority.pwd.getpwuid(args.uid)
         if account.pw_uid == 0:
             raise SystemExit("A non-root desktop account is required")
@@ -60,6 +67,10 @@ def main():
         if args.transport == "lan" and not (args.endpoint or args.kdeconnect_device):
             raise SystemExit("A paired KDE Connect device or explicit LAN endpoint is required")
         source = args.source_state.resolve()
+        if requester is not None:
+            info = source.stat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != args.uid or info.st_mode & 0o077:
+                raise SystemExit("The source state must be the requesting user's private directory")
         root_bytes = (source / "machine-cert.pem").read_bytes()
         private_bytes = (source / "machine-key.pem").read_bytes()
         root = crypto.x509.load_pem_x509_certificate(root_bytes)

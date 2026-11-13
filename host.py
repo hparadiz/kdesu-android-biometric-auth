@@ -4,6 +4,8 @@ import argparse
 import base64
 import fcntl
 import hashlib
+import hmac
+import importlib.util
 import json
 import os
 import pwd
@@ -17,6 +19,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 import ssl
 import threading
 from datetime import datetime, timedelta, timezone
@@ -406,16 +409,205 @@ def validate_context(context):
             raise ValueError("Requester icon dimensions must not exceed 256x256.")
 
 
-def kdeconnect_transport():
-    import importlib.util
+def kdeconnect_module():
     spec = importlib.util.spec_from_file_location("navi_kdeconnect_transport", Path(__file__).with_name("kdeconnect_transport.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.KdeConnectPhone
+    return module
+
+
+def kdeconnect_transport():
+    return kdeconnect_module().KdeConnectPhone
+
+
+# --- Output -----------------------------------------------------------------
+# With --json, stdout carries one JSON event per line for the System Settings
+# module; human-readable text is suppressed so the stream stays parseable.
+JSON_MODE = False
+
+
+def emit(event, **fields):
+    if JSON_MODE:
+        sys.stdout.write(json.dumps(dict(event=event, **fields), separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+
+
+def say(text="", **options):
+    if not JSON_MODE:
+        print(text, flush=True, **options)
+
+
+# --- Code pairing -------------------------------------------------------------
+CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford base32: no I, L, O, U
+OFFER_TTL = 600
+
+
+def pairing_code():
+    return "".join(secrets.choice(CODE_ALPHABET) for _ in range(8))
+
+
+def code_tag(code, label, payload):
+    return hmac.new(code.encode("ascii"), label.encode("ascii") + b"\n" + payload, hashlib.sha256).digest()
+
+
+def verify_hello(hello, code, session_id, machine_id):
+    """The phone's key is only accepted with a tag made from the code the user typed."""
+    if not isinstance(hello, dict) or hello.get("request_id") != session_id or hello.get("kind") != "enroll-hello":
+        return None
+    raw = unb64(hello["payload_b64"])
+    if len(raw) > 8192 or not hmac.compare_digest(unb64(hello["code_tag_b64"]), code_tag(code, "navi-enroll-hello/v1", raw)):
+        raise ValueError("Phone confirmation does not match the pairing code.")
+    value = json.loads(raw)
+    if (not isinstance(value, dict) or value.get("domain") != DOMAIN or value.get("kind") != "enroll-hello"
+            or value.get("session_id") != session_id or value.get("machine_id") != machine_id):
+        raise ValueError("Phone confirmation is for another pairing.")
+    public_der = unb64(value["public_key_spki_base64"])
+    if value.get("phone_key_id") != digest(public_der):
+        raise ValueError("Phone public-key ID mismatch.")
+    return dict(key_id_sha256=digest(public_der), public_key_spki_base64=b64(public_der))
+
+
+def pair_with_code(device, machine_key, root):
+    """Offer this machine over KDE Connect and wait for the phone's code-tagged key."""
+    transport = kdeconnect_transport()(sys.modules[__name__], device["id"], machine_key, root, None)
+    try:
+        code = pairing_code()
+        session_id = secrets.token_hex(16)
+        machine_id = digest(spki(root.public_key()))
+        now = int(time.time() * 1000)
+        payload = {"domain": DOMAIN, "kind": "enroll-offer", "session_id": session_id,
+                   "machine_id": machine_id, "machine_name": socket.gethostname(),
+                   "desktop_device_id": transport.transport["desktop_device_id"],
+                   "issued_at_ms": now, "expires_at_ms": now + OFFER_TTL * 1000}
+        offer = envelope(machine_key, payload)
+        offer["machine_certificate_b64"] = b64(root.public_bytes(serialization.Encoding.DER))
+        offer["code_tag_b64"] = b64(code_tag(code, "navi-enroll-offer/v1", encode(payload)))
+        transport.check()
+        transport.send_offer(session_id, offer)
+        shown = f"{code[:4]}-{code[4:]}"
+        emit("step", step="offer-sent", device_id=device["id"], device_name=device["name"])
+        offer_file = f"navi-auth-enroll-offer-{session_id}.json"
+        emit("code", code=shown, expires_at_ms=payload["expires_at_ms"], machine_id=machine_id, offer_file=offer_file)
+        say(f"\nPair with {device['name']}")
+        say("  Open Navi Authenticator on the phone and enter this code:\n")
+        say(f"      {shown}\n")
+        say(f"  Computer: {socket.gethostname()} · {machine_id[:4]} {machine_id[4:8]} {machine_id[8:12]}"
+            f" · expires in {OFFER_TTL // 60} minutes")
+        say("  No code box in Navi? KDE Connect saved the offer to the phone's Downloads instead.")
+        say("  Tap KDE Connect's file notification and open it with Navi, or in Navi tap")
+        say(f"  Pair a computer… → Open pairing offer… and choose {offer_file}")
+        say("  (Avoid this next time: Navi → Set up KDE Connect.)\n")
+        say("  Waiting for the phone…")
+        deadline = time.monotonic() + OFFER_TTL
+        while time.monotonic() < deadline:
+            identity = verify_hello(transport.read_hello(), code, session_id, machine_id)
+            if identity:
+                emit("step", step="hello-verified", phone_key_id=identity["key_id_sha256"])
+                say("Code confirmed on the phone. Sending the pairing request…")
+                return identity
+            time.sleep(1)
+        raise ValueError("The pairing code expired before the phone confirmed it.")
+    finally:
+        transport.close()
+
+
+# --- KDE Connect device selection ------------------------------------------------
+def enrolled_devices(db):
+    return {row[0]: dict(key_id=row[1], device_name=row[2], enrolled_at=row[3])
+            for row in db.execute("SELECT kdeconnect_device, key_id, device_name, enrolled_at FROM devices "
+                                  "WHERE kdeconnect_device IS NOT NULL AND key_id IN (SELECT key_id FROM approved)")}
+
+
+def known_devices(db):
+    enrolled = enrolled_devices(db)
+    devices = kdeconnect_module().list_devices()
+    for device in devices:
+        record = enrolled.get(device["id"])
+        device["enrolled"] = record is not None
+        device["phone_key_id"] = record["key_id"] if record else None
+    return devices
+
+
+def device_label(device):
+    state = "reachable" if device["reachable"] else "offline"
+    if device["reachable"] and not device["share"]:
+        state = "file sharing disabled"
+    return f"{device['name']} · {state} · {'enrolled' if device['enrolled'] else 'not enrolled'}"
+
+
+def select_device(db, query, purpose):
+    """Resolve an ID or name; without one, choose the only candidate or ask on a TTY."""
+    try:
+        devices = known_devices(db)
+    except Exception:
+        if query and re.fullmatch(r"[A-Za-z0-9_]{1,128}", query) and purpose != "enroll":
+            # KDE Connect listing unavailable: an explicit device ID still routes as before.
+            return dict(id=query, name=query, enrolled=False, phone_key_id=None, reachable=True, share=True)
+        raise
+    if purpose == "enroll":
+        usable = lambda device: device["reachable"] and device["share"]
+    else:
+        usable = lambda device: device["enrolled"]
+    listing = "\n".join(f"  {device['id']}  {device_label(device)}" for device in devices) or "  (none)"
+    if query:
+        matches = [device for device in devices if device["id"] == query]
+        matches = matches or [device for device in devices if device["name"] == query]
+        matches = matches or [device for device in devices if device["name"].casefold() == query.casefold()]
+        if len(matches) != 1:
+            raise ValueError(("Several KDE Connect devices are named " if matches else "No paired KDE Connect device matches ")
+                             + repr(query) + ". Use the device ID:\n" + listing)
+        # A phone enrolled before 0.8 has no device record; --phone-key-id still selects it.
+        return matches[0]
+    candidates = [device for device in devices if usable(device)]
+    if not candidates:
+        raise ValueError(("No reachable paired phone with KDE Connect file sharing enabled."
+                          if purpose == "enroll" else "No enrolled phone. Run enroll first.")
+                         + "\nPaired KDE Connect devices:\n" + listing)
+    if len(candidates) == 1:
+        say(f"Using {candidates[0]['name']} (id {candidates[0]['id']})")
+        return candidates[0]
+    if JSON_MODE or not sys.stdin.isatty():
+        raise ValueError("Several phones are available; choose one with --kdeconnect-device ID_OR_NAME:\n" + listing)
+    for number, device in enumerate(candidates, 1):
+        say(f"  {number}) {device_label(device)}")
+    for device in devices:
+        if device not in candidates:
+            say(f"     {device_label(device)}")
+    while True:
+        answer = input(f"Select device [1-{len(candidates)}]: ").strip()
+        if answer.isdecimal() and 1 <= int(answer) <= len(candidates):
+            return candidates[int(answer) - 1]
+        say("Enter one of the listed numbers, or press Ctrl+C to cancel.")
 
 
 def approve(args, db, machine_key, root):
-    if getattr(args, "endpoint", None) or getattr(args, "kdeconnect_device", None) or getattr(args, "kdeconnect_messages", None):
+    enrolling = args.command == "enroll"
+    device = None
+    leaf = None
+    if enrolling and not args.serial:
+        # Release enrollment: the code shown here pins this machine on the phone.
+        device = select_device(db, args.kdeconnect_device, "enroll")
+        identity = pair_with_code(device, machine_key, root)
+        public = serialization.load_der_public_key(unb64(identity["public_key_spki_base64"]))
+        if not isinstance(public, ec.EllipticCurvePublicKey) or not isinstance(public.curve, ec.SECP256R1):
+            raise ValueError("Phone key must be P-256.")
+        leaf = certificate(public, root, machine_key, "Phone " + identity["key_id_sha256"][:32])
+        phone = kdeconnect_transport()(sys.modules[__name__], device["id"], machine_key, root, leaf)
+        phone.check()
+    elif not enrolling and not (args.endpoint or args.serial or args.kdeconnect_device or args.kdeconnect_messages):
+        # Default authentication route: signed messages over the enrolled phone's KDE Connect pairing.
+        device = select_device(db, None, "authenticate")
+        args.kdeconnect_messages = device["id"]
+        args.phone_key_id = args.phone_key_id or device["phone_key_id"]
+    elif not enrolling:
+        for name in ("kdeconnect_messages", "kdeconnect_device"):
+            if getattr(args, name):
+                device = select_device(db, getattr(args, name), "authenticate")
+                setattr(args, name, device["id"])
+                args.phone_key_id = args.phone_key_id or device["phone_key_id"]
+    if leaf is not None:
+        pass  # Code pairing already connected the certified enrollment transport.
+    elif getattr(args, "endpoint", None) or getattr(args, "kdeconnect_device", None) or getattr(args, "kdeconnect_messages", None):
         rows = db.execute("SELECT certificate FROM approved" + (" WHERE key_id=?" if args.phone_key_id else ""),
                           (args.phone_key_id,) if args.phone_key_id else ()).fetchall()
         if len(rows) != 1:
@@ -437,9 +629,8 @@ def approve(args, db, machine_key, root):
         raise ValueError("Phone public-key ID mismatch.")
     if not isinstance(public, ec.EllipticCurvePublicKey) or not isinstance(public.curve, ec.SECP256R1):
         raise ValueError("Phone key must be P-256.")
-    enrolling = args.command == "enroll"
     if enrolling:
-        leaf = certificate(public, root, machine_key, "Phone " + key_id[:32])
+        leaf = leaf or certificate(public, root, machine_key, "Phone " + key_id[:32])
         leaf_der = leaf.public_bytes(serialization.Encoding.DER)
     else:
         row = db.execute("SELECT certificate FROM approved WHERE key_id = ?", (key_id,)).fetchone()
@@ -498,10 +689,11 @@ def approve(args, db, machine_key, root):
     try:
         phone.write("request.json", request)
         phone.notify(request_id)
-        print(f"Machine: {socket.gethostname()} · {machine_id}", flush=True)
-        print(f"Phone key: {key_id}", flush=True)
-        print(f"Request: {request_id}", flush=True)
-        print("Tap Approve on the phone and use your fingerprint. Waiting up to two minutes…", flush=True)
+        say(f"Machine: {socket.gethostname()} · {machine_id}")
+        say(f"Phone key: {key_id}")
+        say(f"Request: {request_id}")
+        say("Tap Approve on the phone and use your fingerprint. Waiting up to two minutes…")
+        emit("step", step="awaiting-biometric", request_id=request_id, phone_key_id=key_id)
         while time.monotonic() < deadline:
             response = phone.read("response.json")
             if response and response.get("request_id") == request_id:
@@ -523,6 +715,9 @@ def approve(args, db, machine_key, root):
                         raise ValueError("Challenge was already consumed or canceled.")
                     if enrolling:
                         db.execute("INSERT OR REPLACE INTO approved VALUES (?, ?)", (key_id, leaf_der))
+                        db.execute("INSERT OR REPLACE INTO devices VALUES (?, ?, ?, ?)",
+                                   (key_id, device["id"] if device else None,
+                                    device["name"] if device else f"ADB {args.serial}", int(time.time() * 1000)))
                 receipt_payload = {"domain": DOMAIN, "kind": "receipt", "request_id": request_id,
                                    "machine_id": machine_id, "phone_key_id": key_id,
                                    "response_sha256": digest(signature), "status": "approved",
@@ -531,9 +726,12 @@ def approve(args, db, machine_key, root):
                 atomic_write(STATE / "last-verification.json", encode({"request": request,
                              "response": response, "receipt": receipt}) + b"\n")
                 phone.write("receipt.json", receipt)
-                print("ENROLLED: this machine signed and approved the phone public key." if enrolling
-                      else "VERIFIED (notification-only): phone approval verified; desktop authentication is separate."
-                      if args.notification_only else "AUTHENTICATED: approved phone certificate and fresh phone signature verified.", flush=True)
+                emit("step", step="receipt-sent")
+                say("ENROLLED: this machine signed and approved the phone public key." if enrolling
+                    else "VERIFIED (notification-only): phone approval verified; desktop authentication is separate."
+                    if args.notification_only else "AUTHENTICATED: approved phone certificate and fresh phone signature verified.")
+                emit("done", result="enrolled" if enrolling else "verified" if args.notification_only else "authenticated",
+                     phone_key_id=key_id, device_id=device["id"] if device else None)
                 return
             time.sleep(1)
         raise ValueError("Challenge expired without a signed approval.")
@@ -552,23 +750,138 @@ def approve(args, db, machine_key, root):
             phone.close()
 
 
+def default_state():
+    # Checkouts created before 0.8 kept state beside the script; keep using it.
+    legacy = Path(__file__).resolve().parent / ".state"
+    if legacy.is_dir():
+        return legacy
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(base) / "navi-auth"
+
+
+def certificate_expiry(der):
+    return int(x509.load_der_x509_certificate(der).not_valid_after_utc.timestamp() * 1000)
+
+
+# --- Installed root authority (read-only status, self-revocation) -------------
+AUTHORIZE = Path("/usr/libexec/navi-auth/authorize")
+EXEC_PROTOCOL = "navi-auth-exec/v1"
+
+
+def authority_request(event, **fields):
+    """One request/reply through the setuid helper; it derives this account from the kernel."""
+    override = os.environ.get("NAVI_AUTH_AUTHORIZE")
+    helper = Path(override) if override else AUTHORIZE
+    try:
+        info = helper.stat()
+    except FileNotFoundError:
+        return None, "The protected authority is not installed."
+    if not override and (info.st_uid != 0 or not info.st_mode & 0o4000):
+        return None, f"{helper} is not a root-owned setuid helper."
+    request_id = str(uuid.uuid4())
+    line = json.dumps(dict(protocol=EXEC_PROTOCOL, event=event, request_id=request_id, **fields)) + "\n"
+    try:
+        # Pipes (not a pty or socket): the helper requires private FIFOs.
+        result = subprocess.run([str(helper)], input=line.encode(), capture_output=True, timeout=10, env={}, cwd="/")
+    except subprocess.TimeoutExpired:
+        return None, "The protected authority did not answer."
+    reply = None
+    for raw in result.stdout.splitlines():
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and value.get("protocol") == EXEC_PROTOCOL and value.get("request_id") == request_id:
+            reply = value
+    if reply is None or reply.get("event") == "error":
+        detail = (reply or {}).get("message") or result.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no reply"]
+        detail = detail if isinstance(detail, str) else detail[0]
+        return None, "Protected authority: " + detail.split("authority-failed: ", 1)[-1][:300]
+    return reply, None
+
+
+def authority_status():
+    reply, error = authority_request("status")
+    if reply is None:
+        emit("authority", available=False, error=error)
+        say(error)
+        return
+    status = {name: reply.get(name) for name in ("configured", "valid", "reason", "account_matches", "enabled",
+                                                 "machine_key_id", "phones") if name in reply}
+    emit("authority", available=True, **status)
+    if JSON_MODE:
+        return
+    if not status.get("configured"):
+        print("Administrator prompts: not configured on this computer.")
+    elif not status.get("valid"):
+        print("Administrator prompts: configuration is invalid:", status.get("reason"))
+    elif not status.get("account_matches"):
+        print("Administrator prompts: configured for a different account.")
+    else:
+        print("Administrator prompts:", "enabled" if status.get("enabled") else "disabled")
+        print("Authority machine ID:", status.get("machine_key_id"))
+        for phone in status.get("phones", []):
+            state = "enabled" if phone.get("enabled") else "revoked"
+            print(f"  {phone['phone_key_id']} · {state} · {phone.get('transport')} · {phone.get('kdeconnect_device') or '-'}"
+                  f" · certificate expires {(phone.get('certificate_expires') or '?')[:10]}")
+
+
+def show_status(root):
+    """Read-only summary; it takes no session lock so it can run beside an enrollment."""
+    machine_id = digest(spki(root.public_key())) if root is not None else None
+    phones = []
+    database = STATE / "approvals.sqlite3"
+    if database.exists():
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
+            has_devices = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='devices'").fetchone()
+            query = ("SELECT a.key_id, a.certificate, d.kdeconnect_device, d.device_name, d.enrolled_at FROM approved a "
+                     "LEFT JOIN devices d ON d.key_id = a.key_id" if has_devices else
+                     "SELECT key_id, certificate, NULL, NULL, NULL FROM approved")
+            for key_id, cert, device_id, name, enrolled_at in db.execute(query):
+                phones.append(dict(phone_key_id=key_id, kdeconnect_device=device_id, device_name=name,
+                                   enrolled_at_ms=enrolled_at, certificate_expires_at_ms=certificate_expiry(bytes(cert))))
+    if JSON_MODE:
+        emit("status", initialized=root is not None, machine_id=machine_id, state_dir=str(STATE), phones=phones)
+        return
+    if root is None:
+        print("Not initialized. Run: host.py init")
+        return
+    print("Machine ID:", machine_id)
+    print("Machine certificate:", STATE / "machine-cert.pem")
+    for phone in phones:
+        expires = datetime.fromtimestamp(phone["certificate_expires_at_ms"] / 1000, timezone.utc).date()
+        label = f" · {phone['device_name']}" if phone["device_name"] else ""
+        print(f"Approved phone: {phone['phone_key_id']}{label} · certificate expires {expires}")
+
+
 def main():
-    global STATE
+    global STATE, JSON_MODE
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state-dir", type=Path, default=STATE, help="Private machine identity and approval database")
+    parser.add_argument("--state-dir", type=Path, default=None, help="Private machine identity and approval database"
+                        " (default: $XDG_STATE_HOME/navi-auth, or .state beside this script if present)")
+    parser.add_argument("--json", action="store_true", help="Write one JSON event per line to stdout (for the settings UI)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Create or inspect this machine's signing authority")
     sub.add_parser("status", help="Show machine identity and approved phone keys")
+    sub.add_parser("devices", help="List paired KDE Connect devices and their enrollment")
     revoke = sub.add_parser("revoke", help="Remove a phone key's approval")
     revoke.add_argument("key_id")
+    sub.add_parser("authority-status", help="Show which phones the installed root authority accepts for this account")
+    authority_revoke = sub.add_parser("authority-revoke",
+                                      help="Disable a KDE Connect device for administrator prompts (no password needed)")
+    authority_revoke.add_argument("kdeconnect_device", metavar="DEVICE_ID")
     for name in ("enroll", "authenticate"):
         command = sub.add_parser(name)
-        transport = command.add_mutually_exclusive_group(required=True)
-        transport.add_argument("--serial", help="Explicit Pixel or Nexus 6P ADB serial (development only)")
+        transport = command.add_mutually_exclusive_group()
+        transport.add_argument("--serial", help="Explicit Pixel or Nexus 6P ADB serial (debug APK fallback)")
+        if name == "enroll":
+            transport.add_argument("--kdeconnect-device", metavar="ID_OR_NAME",
+                                   help="Pair with a code over KDE Connect (default; asks when several phones are available)")
         if name == "authenticate":
             transport.add_argument("--endpoint", help="Phone LAN IP:port, no debugging required")
-            transport.add_argument("--kdeconnect-device", help="Resolve the paired phone's current LAN IP through KDE Connect")
-            transport.add_argument("--kdeconnect-messages", help="Carry signed messages through the existing KDE Connect pairing")
+            transport.add_argument("--kdeconnect-device", metavar="ID_OR_NAME", help="Resolve the paired phone's current LAN IP through KDE Connect")
+            transport.add_argument("--kdeconnect-messages", metavar="ID_OR_NAME",
+                                   help="Carry signed messages through the existing KDE Connect pairing (default)")
             command.add_argument("--phone-key-id", help="Already-approved phone key, required when more than one is approved")
             command.add_argument("--operation", default="Verify fingerprint authentication on this computer")
             command.add_argument("--application", default="Phone Authenticator")
@@ -581,11 +894,46 @@ def main():
             command.add_argument("--desktop-request-id", help="Associated desktop dialog UUID")
             command.add_argument("--notification-only", action="store_true", help="Verify phone approval without authorizing desktop execution")
     args = parser.parse_args()
-    STATE = args.state_dir.resolve()
+    JSON_MODE = args.json
+    STATE = (args.state_dir or default_state()).resolve()
     os.umask(0o077)
     STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
     if STATE.stat().st_mode & 0o077:
         raise ValueError("State directory must be accessible only to its owner (chmod 700).")
+    if args.command == "status":
+        show_status(machine_identity()[1] if (STATE / "machine-key.pem").exists() else None)
+        return
+    if args.command == "authority-status":
+        authority_status()
+        return
+    if args.command == "authority-revoke":
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", args.kdeconnect_device):
+            raise ValueError("Expected a KDE Connect device ID.")
+        reply, error = authority_request("revoke", kdeconnect_device=args.kdeconnect_device)
+        if reply is None:
+            raise ValueError(error)
+        say("Disabled for administrator prompts.")
+        emit("done", result="authority-revoked", kdeconnect_device=args.kdeconnect_device)
+        return
+    if args.command == "devices":
+        database = STATE / "approvals.sqlite3"
+        with sqlite3.connect(":memory:", uri=True) as db:
+            db.execute("CREATE TABLE approved (key_id TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE devices (key_id TEXT, kdeconnect_device TEXT, device_name TEXT, enrolled_at INTEGER)")
+            if database.exists():
+                db.execute("ATTACH DATABASE ? AS saved", (f"file:{database}?mode=ro",))
+                db.execute("INSERT INTO approved SELECT key_id FROM saved.approved")
+                if db.execute("SELECT 1 FROM saved.sqlite_master WHERE name='devices'").fetchone():
+                    db.execute("INSERT INTO devices SELECT * FROM saved.devices")
+            devices = known_devices(db)
+        if JSON_MODE:
+            emit("devices", devices=devices)
+        else:
+            for device in devices:
+                print(f"{device['id']}  {device_label(device)}")
+            if not devices:
+                print("No paired KDE Connect devices.")
+        return
     if getattr(args, "operation", "") and (len(args.operation) > 160 or any(ord(c) < 32 for c in args.operation)):
         raise ValueError("Operation must be printable text of at most 160 characters.")
     for name, limit in (("application", 80), ("action_id", 160), ("requested_command", 512), ("target_user", 64), ("icon_name", 128)):
@@ -601,25 +949,32 @@ def main():
         if not 1 <= width <= 256 or not 1 <= height <= 256:
             raise ValueError("Requester icon dimensions must not exceed 256x256.")
     with (STATE / "session.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("Another enrollment or authentication is already running for this account.") from None
         machine_key, root = machine_identity(create=args.command == "init")
         with sqlite3.connect(STATE / "approvals.sqlite3") as db:
             db.execute("CREATE TABLE IF NOT EXISTS approved (key_id TEXT PRIMARY KEY, certificate BLOB NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, payload BLOB NOT NULL, status TEXT NOT NULL)")
+            # Display/route metadata only; trust is the approved table and its certificates.
+            db.execute("CREATE TABLE IF NOT EXISTS devices (key_id TEXT PRIMARY KEY, kdeconnect_device TEXT, "
+                       "device_name TEXT, enrolled_at INTEGER)")
             # A process restart cannot revive a previous challenge.
             db.execute("UPDATE requests SET status='canceled' WHERE status='pending'")
             db.commit()
-            if args.command in ("init", "status"):
-                print("Machine ID:", digest(spki(root.public_key())))
-                print("Machine certificate:", STATE / "machine-cert.pem")
-                for row in db.execute("SELECT key_id FROM approved"):
-                    print("Approved phone:", row[0])
+            if args.command == "init":
+                emit("done", result="initialized", machine_id=digest(spki(root.public_key())))
+                if not JSON_MODE:
+                    show_status(root)
             elif args.command == "revoke":
                 if not re.fullmatch(r"[0-9a-f]{64}", args.key_id):
                     raise ValueError("Expected a SHA-256 phone key ID.")
                 with db:
                     count = db.execute("DELETE FROM approved WHERE key_id=?", (args.key_id,)).rowcount
-                print("Revoked." if count else "Key was not approved.")
+                    db.execute("DELETE FROM devices WHERE key_id=?", (args.key_id,))
+                say("Revoked." if count else "Key was not approved.")
+                emit("done", result="revoked" if count else "not-approved", phone_key_id=args.key_id)
             else:
                 approve(args, db, machine_key, root)
 
@@ -631,8 +986,10 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        emit("error", message="Canceled.", canceled=True)
         print("Canceled.", file=sys.stderr)
         sys.exit(130)
     except Exception as error:
+        emit("error", message=str(error))
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(1)

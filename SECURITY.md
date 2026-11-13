@@ -66,11 +66,32 @@ boundary preventing direct helper invocation.
 - **Revocation:** configuration is rechecked at commit. Already committed commands
   are not undone. A stronger guarantee about concurrent revoke return versus
   consume/spawn needs a defined synchronization contract and further validation.
-- **Trusted phone enrollment:** bootstrap currently needs a Pixel, a debug APK
-  and authorized ADB. Network enrollment of unknown computers and a release-only
-  enrollment flow are not implemented. Debug APKs are for that trusted bootstrap.
-  Release builds reject unknown computer keys and all enrollment requests in the
-  shared validator, in addition to the transport checks.
+- **Authority status:** the setuid helper answers a read-only `status` request
+  from any local account. Only the configured desktop account receives phone key
+  IDs, enablement, routes and certificate expiry; other accounts learn only that
+  an authority is configured. Logs, executions and certificates are never returned.
+  The helper's existing `revoke` request likewise only disables the caller's own
+  device. Neither request can enable a phone.
+- **Enabling from System Settings:** adding a phone to the root authority always
+  needs the administrator password (polkit `auth_admin`, never cached). The polkit
+  entry point only runs the installed configurator, which re-validates the machine
+  key, phone certificate and route as root. When started by pkexec it also refuses
+  any desktop account other than the requesting user (`PKEXEC_UID`) and any source
+  state directory that is not that user's own mode-0700 directory.
+- **Trusted phone enrollment:** release builds enroll with a one-time
+  8-character code shown on the computer and typed into the phone, carried over
+  an existing KDE Connect pairing (see [Architecture](docs/ARCHITECTURE.md#code-enrollment-release-builds)).
+  Trust therefore rests on the KDE Connect pairing, the user reading the code from
+  the intended screen and the biometric signature. Anyone who can see the code
+  *and* controls the selected paired KDE Connect device during its ten minutes
+  could enroll that device; compare the computer fingerprint shown on the phone.
+  The code is 40 bits and is only checked inside KDE Connect's encrypted channel.
+  Enrolling only grants account-level approval; administrator prompts still need
+  the separate protected configuration. Android 9 cannot receive KDE Connect
+  messages, so it keeps the debug-APK and authorized-ADB bootstrap. Release
+  builds reject unknown computer keys and every enrollment without a matching
+  code pin in the shared validator. This flow has not yet been verified on
+  hardware (see [verification record](docs/VERIFICATION.md)).
 - **Biometric modality:** Android selects strength, not exclusively fingerprint.
   Locally observed hardware enforcement is not independently verified attestation.
 - **Availability:** the LAN service adds network-facing code. Frames, workers and

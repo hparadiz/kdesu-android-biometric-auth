@@ -211,6 +211,35 @@ def revoke_for_device(uid, event):
         audit("phone-authority-revoked uid=" + str(uid))
 
 
+def authority_status(uid, event):
+    """Read-only summary for the invoking account; never exposes logs, executions or certificates."""
+    if set(event) != {"protocol", "event", "request_id"} or event["event"] != "status":
+        raise ValueError("Invalid status request")
+    if not CONFIG.exists():
+        return dict(configured=False)
+    try:
+        config = json.loads(trusted_file(CONFIG, True), object_pairs_hook=unique_object)
+        entries = phone_entries(config)
+    except Exception as error:
+        return dict(configured=True, valid=False, reason=str(error)[:200])
+    matches = uid != 0 and config.get("uid") == uid
+    phones = []
+    if matches:
+        for entry in entries:
+            expires = None
+            try:
+                leaf = crypto.x509.load_der_x509_certificate(base64.b64decode(entry["phone_certificate_b64"], validate=True))
+                expires = leaf.not_valid_after_utc.isoformat()
+            except Exception:
+                pass
+            phones.append(dict(phone_key_id=entry["phone_key_id"], enabled=entry.get("enabled", True),
+                               transport=entry.get("transport"), kdeconnect_device=entry.get("kdeconnect_device"),
+                               certificate_expires=expires))
+    return dict(configured=True, valid=True, account_matches=matches,
+                enabled=bool(config.get("enabled", True)) if matches else None,
+                machine_key_id=config.get("machine_key_id") if matches else None, phones=phones)
+
+
 def phone_entries(config):
     entries = config.get("phones")
     if entries is None:
@@ -572,6 +601,9 @@ async def run_stdio(uid):
         if event.get("event") == "revoke":
             revoke_for_device(uid, event)
             await send(writer, "revoked", event["request_id"])
+            return
+        if event.get("event") == "status":
+            await send(writer, "status", event["request_id"], **authority_status(uid, event))
             return
         with (STATE / "authority.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
