@@ -31,7 +31,7 @@ DEVICE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 DEVICE_PATH_ID = re.compile(r"[A-Za-z0-9_]{1,128}\Z")
 REQUEST_ID = re.compile(r"[a-f0-9]{32}\Z")
 MAIL_FILE = re.compile(r"navi-auth-(request|receipt|cancel|enroll-offer)-[a-f0-9]{32}\.json\Z")
-INTERPRETER = "/usr/bin/python3.14"
+INTERPRETER = "/usr/bin/python3"
 SERVICE = "org.kde.kdeconnect"
 SHARE_INTERFACE = "org.kde.kdeconnect.device.share"
 

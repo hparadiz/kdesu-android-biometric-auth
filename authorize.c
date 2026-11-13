@@ -56,7 +56,7 @@ int main(int argc, char **argv)
             sigaction(sig, &action, NULL);
     umask(0077);
     alarm(180); /* Absolute process lifetime, including shutdown after a lost GUI. */
-    char *const arguments[] = {"/usr/bin/python3.14", "-I",
+    char *const arguments[] = {"/usr/bin/python3", "-I",
         "/usr/libexec/navi-auth/rootauth.py", "--stdio", uid, NULL};
     char *const environment[] = {"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "LANG=C.UTF-8", NULL};
     execve(arguments[0], arguments, environment);

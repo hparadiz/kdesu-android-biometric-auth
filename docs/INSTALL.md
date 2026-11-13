@@ -9,8 +9,11 @@
   Other manufacturers are unverified and need the model restriction reviewed;
   installing an APK manually does not remove the enrollment helper restriction.
 - Linux with Python and `cryptography` **42+** for the manual host CLI. The
-  installed desktop launcher/configurator are currently pinned to
-  **`/usr/bin/python3.14`**. Use distro packages for the protected interpreter and
+  installed helper, configurator and settings page run the system default
+  **`/usr/bin/python3`** (on Gentoo, python-exec following `eselect python`), so a
+  Python upgrade needs no change here. That default Python must have
+  `cryptography`, `dbus-python` and `pygobject`; the ebuild installs them for every
+  Python in `PYTHON_TARGETS`. Use distro packages for the protected interpreter and
   its modules, not a user virtualenv.
 - Android SDK **platforms;android-34**, **build-tools;34.0.0**, platform-tools/ADB,
   Bash and JDK 17+. No third-party Android runtime dependencies.
@@ -285,11 +288,11 @@ Prompts…**). Use the state directory printed by `host.py --json status`; older
 checkouts keep `.state` beside `host.py`:
 
 ```sh
-/usr/bin/python3.14 -I /usr/libexec/navi-auth/configure-authority.py \
+/usr/bin/python3 -I /usr/libexec/navi-auth/configure-authority.py \
   --source-state /home/alice/.local/state/navi-auth \
   --uid 1000 --transport lan --kdeconnect-device PAIRED_DEVICE_ID \
   --phone-key-id PHONE_KEY_SHA256 --machine-key-id MACHINE_KEY_SHA256
-/usr/bin/python3.14 -I /usr/libexec/navi-auth/rootauth.py --check
+/usr/bin/python3 -I /usr/libexec/navi-auth/rootauth.py --check
 stat -c '%U:%G %a %n' /usr/libexec/navi-auth/authorize \
   /etc/navi-auth /var/lib/navi-auth
 ```
@@ -316,12 +319,12 @@ host CLI after multiple phones have been enrolled.
 From the administrator shell, add the reviewed phone without replacing the others:
 
 ```sh
-/usr/bin/python3.14 -I /usr/libexec/navi-auth/configure-authority.py \
+/usr/bin/python3 -I /usr/libexec/navi-auth/configure-authority.py \
   --source-state /home/alice/.local/state/navi-auth \
   --uid 1000 --transport lan --endpoint SECOND_PHONE_IP:39841 \
   --phone-key-id SECOND_PHONE_KEY_SHA256 --machine-key-id MACHINE_KEY_SHA256 \
   --add-phone
-/usr/bin/python3.14 -I /usr/libexec/navi-auth/rootauth.py --check
+/usr/bin/python3 -I /usr/libexec/navi-auth/rootauth.py --check
 ```
 
 Use `--kdeconnect-device SECOND_DEVICE_ID` instead of `--endpoint` for discovery.
@@ -333,7 +336,7 @@ command; the first verified approval wins, and other phones receive withdrawals.
 To disable one phone while retaining the others:
 
 ```sh
-/usr/bin/python3.14 -I /usr/libexec/navi-auth/configure-authority.py \
+/usr/bin/python3 -I /usr/libexec/navi-auth/configure-authority.py \
   --revoke --phone-key-id PHONE_KEY_SHA256
 ```
 
@@ -363,7 +366,7 @@ preserve the exact command for review; do not hide large payloads in encodings.
 To disable protected phone execution, an administrator runs:
 
 ```sh
-/usr/bin/python3.14 -I /usr/libexec/navi-auth/configure-authority.py --revoke
+/usr/bin/python3 -I /usr/libexec/navi-auth/configure-authority.py --revoke
 ```
 
 This prevents new requests and rejects a configuration change observed before

@@ -21,7 +21,7 @@ set_package_properties(KF6Kirigami PROPERTIES TYPE RUNTIME)
 # Installed paths of the navi-auth package; NAVI_AUTH_HOST/NAVI_AUTH_PYTHON override at runtime.
 set(NAVI_AUTH_HOST "/usr/libexec/navi-auth/host.py" CACHE STRING "Installed host.py")
 set(NAVI_AUTH_CONFIGURE "/usr/libexec/navi-auth/configure-authority.py" CACHE STRING "Installed configurator")
-set(NAVI_AUTH_PYTHON "/usr/bin/python3.14" CACHE STRING "Interpreter for host.py")
+set(NAVI_AUTH_PYTHON "/usr/bin/python3" CACHE STRING "Interpreter for host.py")
 set(NAVI_AUTH_POLKIT_CONFIGURE "/usr/libexec/navi-auth/configure" CACHE STRING "pkexec entry point for the configurator")
 
 add_definitions(-DTRANSLATION_DOMAIN=\"kcm_navi_auth\")

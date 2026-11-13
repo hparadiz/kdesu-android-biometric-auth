@@ -3,4 +3,4 @@
 # Fixed polkit entry point (pkexec runs only this path, with a cleared environment).
 # Every argument is validated by the installed configurator, which also checks that
 # the requested desktop account and source state belong to the user who asked.
-exec /usr/bin/python3.14 -I /usr/libexec/navi-auth/configure-authority.py "$@"
+exec /usr/bin/python3 -I /usr/libexec/navi-auth/configure-authority.py "$@"

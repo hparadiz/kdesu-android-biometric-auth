@@ -23,8 +23,10 @@ sequenceDiagram
 
 `authorize.c` is a small root-owned setuid executable. It requires private process
 pipes, derives the original caller UID from the kernel, clears inherited
-environment/groups/descriptors, disables core dumps and invokes a fixed Python
-3.14 interpreter in isolated mode. `rootauth.py` owns authorization and execution.
+environment/groups/descriptors, disables core dumps and invokes the system default
+`/usr/bin/python3` in isolated mode (`-I`). On Gentoo that is python-exec, which
+follows the root-owned `eselect python` setting; the helper's cleared environment
+means `EPYTHON` cannot redirect it to another interpreter. `rootauth.py` owns authorization and execution.
 No desktop listening socket or persistent desktop authentication service is needed.
 
 The helper must be `/usr/libexec/navi-auth/authorize`, with a protected directory

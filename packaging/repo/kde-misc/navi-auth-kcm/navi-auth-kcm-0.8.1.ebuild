@@ -30,7 +30,7 @@ src_configure() {
     local mycmakeargs=(
         -DNAVI_AUTH_HOST=/usr/libexec/navi-auth/host.py
         -DNAVI_AUTH_CONFIGURE=/usr/libexec/navi-auth/configure-authority.py
-        -DNAVI_AUTH_PYTHON=/usr/bin/python3.14
+        -DNAVI_AUTH_PYTHON=/usr/bin/python3
         -DNAVI_AUTH_POLKIT_CONFIGURE=/usr/libexec/navi-auth/configure
     )
     cmake_src_configure
