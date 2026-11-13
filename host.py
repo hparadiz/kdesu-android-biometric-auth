@@ -493,10 +493,9 @@ def pair_with_code(device, machine_key, root):
         say(f"      {shown}\n")
         say(f"  Computer: {socket.gethostname()} · {machine_id[:4]} {machine_id[4:8]} {machine_id[8:12]}"
             f" · expires in {OFFER_TTL // 60} minutes")
-        say("  No code box in Navi? KDE Connect saved the offer to the phone's Downloads instead.")
-        say("  Tap KDE Connect's file notification and open it with Navi, or in Navi tap")
-        say(f"  Pair a computer… → Open pairing offer… and choose {offer_file}")
-        say("  (Avoid this next time: Navi → Set up KDE Connect.)\n")
+        say("  No code box in Navi? KDE Connect isn't delivering to Navi yet. On the phone:")
+        say("  Navi → ☰ → Settings → Set up KDE Connect, then press Ctrl+C and run enroll again.")
+        say(f"  (Opening {offer_file} from Downloads with Navi shows the same steps.)\n")
         say("  Waiting for the phone…")
         deadline = time.monotonic() + OFFER_TTL
         while time.monotonic() < deadline:

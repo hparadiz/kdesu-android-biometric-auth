@@ -4,12 +4,12 @@ import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
-import android.util.Log;
 import android.widget.Toast;
 
 /**
  * "Open with Navi" / "Share to Navi" for a pairing offer that KDE Connect saved to Downloads.
- * Only enroll offers are accepted here; the offer stays untrusted until the user types the code.
+ * Only enroll offers are accepted here; the offer stays untrusted until the user types the code. When
+ * Navi could not follow the rest of the enrollment from Downloads, the KDE Connect setup screen opens instead.
  */
 public final class OfferImportActivity extends Activity {
     @SuppressWarnings("deprecation") // getParcelableExtra(String) is the only form before Android 13.
@@ -23,22 +23,18 @@ public final class OfferImportActivity extends Activity {
             return;
         }
         new Thread(() -> {
-            String error = null;
-            try {
-                KdeConnectInbox.receiveOfferFile(getApplicationContext(), KdeConnectInbox.readDocument(this, uri));
-            } catch (IllegalArgumentException invalid) {
-                error = invalid.getMessage();
-            } catch (Exception failure) {
-                Log.w("PhoneAuthenticator", "Pairing offer import failed", failure);
-                error = "This pairing offer could not be used. Start pairing again on the computer.";
-            }
-            String message = error;
+            KdeConnectInbox.ImportResult result = KdeConnectInbox.importOffer(this, uri);
             runOnUiThread(() -> {
-                if (message != null) {
-                    Toast.makeText(this, message, Toast.LENGTH_LONG).show();
-                } else {
-                    startActivity(new Intent(this, MainActivity.class)
-                            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP));
+                switch (result.kind) {
+                    case ACCEPTED:
+                        startActivity(new Intent(this, MainActivity.class)
+                                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP));
+                        break;
+                    case NEEDS_SETUP:
+                        startActivity(KdeConnectSetupActivity.forOffer(this, result.machineName));
+                        break;
+                    default:
+                        Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
                 }
                 finish();
             });

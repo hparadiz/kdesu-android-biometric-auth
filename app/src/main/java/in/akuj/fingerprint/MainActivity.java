@@ -5,7 +5,6 @@ import android.app.AlertDialog;
 import android.app.KeyguardManager;
 import android.app.NotificationManager;
 import android.Manifest;
-import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -14,14 +13,12 @@ import android.graphics.Color;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
 import android.hardware.fingerprint.FingerprintManager;
-import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.util.Log;
@@ -30,7 +27,7 @@ import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
-import android.widget.Switch;
+import android.widget.PopupMenu;
 import android.widget.TextView;
 import org.json.JSONObject;
 import java.security.Signature;
@@ -40,22 +37,19 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final String TAG = "PhoneAuthenticator";
-    private static final int PICK_OFFER = 21, DOWNLOADS_PERMISSION = 22;
-    private static final String PAIRING_HELP = "Start on the computer: open System Settings → Navi Authenticator, "
-            + "pick this phone and press Enroll (or run host.py enroll in a terminal). The computer shows an "
-            + "8-character code, and a code box appears here.\n\nNo code box? KDE Connect saved the offer to "
-            + "Downloads instead. Tap Open pairing offer… and choose the navi-auth-enroll-offer-….json file, or tap "
-            + "KDE Connect's file notification and open it with Navi.";
+    private static final int SETTINGS = 23;
+    private static final String PAIRING_HELP = "No computers paired yet. Start on your computer: System Settings → "
+            + "Navi Authenticator → choose this phone → Enroll. A code box appears here.\n\nNo code box? KDE Connect "
+            + "isn't delivering to Navi yet: ☰ → Settings → Set up KDE Connect, then press Enroll again.";
     private long lastDownloadScan;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView status, detail, challenge, keyInfo;
-    private Button authenticate, enroll, reset, proof, pairingConfirm, pairingOpen;
+    private Button authenticate, enroll, proof, pairingConfirm, pairingOpen;
     private EditText pairingCode;
     private View pairingPanel;
     private String shownPairing;
     private boolean pairingBusy;
-    private Switch deskReader;
     private SharedPreferences deskSettings;
     private Bridge bridge;
     private SigningKey key;
@@ -64,12 +58,10 @@ public final class MainActivity extends Activity {
     private Attempt active;
     private String seenEnvelope, proofText, openedRequestId;
     private boolean stopped = true, resumed, busy, ready;
-    private CancellationSignal networkCancellation;
     private final Runnable timeout = () -> cancel("Challenge expired", "Start a fresh request on the computer.");
     private final Runnable poll = new Runnable() {
         @Override public void run() {
             if (stopped) return;
-            updateNetworkStatus();
             if (key != null && !busy) pollComputer();
             scanDownloads();
             updatePairing();
@@ -101,16 +93,10 @@ public final class MainActivity extends Activity {
         keyInfo = findViewById(R.id.key_info);
         authenticate = findViewById(R.id.authenticate);
         enroll = findViewById(R.id.enroll);
-        reset = findViewById(R.id.reset);
         proof = findViewById(R.id.proof);
         deskSettings = getSharedPreferences("desk_reader", MODE_PRIVATE);
-        deskReader = findViewById(R.id.desk_reader);
-        deskReader.setChecked(deskSettings.getBoolean("enabled", false));
-        updateDeskReader();
-        deskReader.setOnCheckedChangeListener((button, enabled) -> {
-            deskSettings.edit().putBoolean("enabled", enabled).apply();
-            updateDeskReader();
-        });
+        findViewById(R.id.menu_button).setOnClickListener(this::showMenu);
+        findViewById(R.id.paired_count).setOnClickListener(v -> startActivity(new Intent(this, PairedComputersActivity.class)));
         Button detailsToggle = findViewById(R.id.details_toggle);
         View connectionDetails = findViewById(R.id.connection_details);
         detailsToggle.setOnClickListener(v -> {
@@ -129,11 +115,6 @@ public final class MainActivity extends Activity {
                     : new Intent(Settings.ACTION_FINGERPRINT_ENROLL);
             startActivity(settings);
         });
-        reset.setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setTitle("Reset key and all computer pairings?")
-                .setMessage("The signing key and all pairings will be deleted. Each computer must approve the new key before you can authenticate again.")
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Reset", (dialog, which) -> resetKey()).show());
         proof.setOnClickListener(v -> showProof());
         pairingPanel = findViewById(R.id.pairing_panel);
         pairingCode = findViewById(R.id.pairing_code);
@@ -141,25 +122,19 @@ public final class MainActivity extends Activity {
         pairingConfirm.setOnClickListener(v -> confirmPairing());
         pairingCode.setOnEditorActionListener((view, action, event) -> { confirmPairing(); return true; });
         pairingOpen = findViewById(R.id.pairing_open);
-        pairingOpen.setOnClickListener(v -> openOfferPicker());
-        findViewById(R.id.pair_computer).setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setTitle("Pair a computer")
-                .setMessage(PAIRING_HELP)
-                .setNegativeButton("Close", null)
-                .setPositiveButton("Open pairing offer…", (dialog, which) -> openOfferPicker()).show());
-        findViewById(R.id.downloads_allow).setOnClickListener(v -> requestPermissions(new String[]{
-                Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE}, DOWNLOADS_PERMISSION));
-        findViewById(R.id.network_toggle).setOnClickListener(v -> toggleNetwork());
-        findViewById(R.id.background_setup).setOnClickListener(v ->
-                startActivity(new Intent(this, BackgroundSetupActivity.class)));
-        findViewById(R.id.kdeconnect_setup).setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setTitle("Connect through KDE Connect")
-                .setMessage("In KDE Connect, open the file-sharing settings and choose a custom destination folder. Select Navi Authenticator from the folder picker’s side menu, then Use this folder.\n\nSigned authentication files go directly to Navi. Other shared files still go to Downloads. Your existing pairing stays in use.\n\nWithout this setting, pairing offers land in Downloads: open the received file with Navi, or use Pair a computer… → Open pairing offer….")
-                .setNegativeButton("Close", null).setPositiveButton("Open KDE Connect", (dialog, which) -> {
-                    Intent open = getPackageManager().getLaunchIntentForPackage(KdeConnectInbox.PACKAGE);
-                    if (open != null) startActivity(open);
-                    else setStatus("KDE Connect unavailable", "Install and pair KDE Connect first.");
-                }).show());
+        pairingOpen.setOnClickListener(v -> startActivity(new Intent(this, PairedComputersActivity.class)));
+    }
+
+    private void showMenu(View anchor) {
+        PopupMenu menu = new PopupMenu(this, anchor);
+        menu.getMenu().add(0, 1, 0, "Paired computers");
+        menu.getMenu().add(0, 2, 1, "Settings");
+        menu.setOnMenuItemClickListener(item -> {
+            if (item.getItemId() == 1) startActivity(new Intent(this, PairedComputersActivity.class));
+            else startActivityForResult(new Intent(this, SettingsActivity.class), SETTINGS);
+            return true;
+        });
+        menu.show();
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -184,7 +159,7 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
-        updateDownloadsAccess();
+        updateDeskReader();
     }
 
     @Override public void onWindowFocusChanged(boolean focused) {
@@ -206,54 +181,10 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void updateDownloadsAccess() {
-        boolean needed = Build.VERSION.SDK_INT <= 29
-                && checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED;
-        findViewById(R.id.downloads_access).setVisibility(needed ? View.VISIBLE : View.GONE);
-    }
-
-    @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
-        super.onRequestPermissionsResult(code, permissions, results);
-        if (code != DOWNLOADS_PERMISSION) return;
-        updateDownloadsAccess();
-        lastDownloadScan = 0;
-        scanDownloads();
-    }
-
-    private void openOfferPicker() {
-        Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
-                .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/json", "text/plain", "application/octet-stream"})
-                .putExtra(DocumentsContract.EXTRA_INITIAL_URI,
-                        Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload"));
-        try {
-            startActivityForResult(pick, PICK_OFFER);
-        } catch (ActivityNotFoundException missing) {
-            setStatus("File picker unavailable", "Open the navi-auth-enroll-offer file from KDE Connect's notification instead.");
-        }
-    }
-
     @Override protected void onActivityResult(int code, int result, Intent data) {
         super.onActivityResult(code, result, data);
-        if (code != PICK_OFFER || result != RESULT_OK || data == null || data.getData() == null) return;
-        Uri uri = data.getData();
-        worker.execute(() -> {
-            String error = null;
-            try {
-                KdeConnectInbox.receiveOfferFile(getApplicationContext(), KdeConnectInbox.readDocument(this, uri));
-            } catch (IllegalArgumentException invalid) {
-                error = invalid.getMessage();
-            } catch (Exception failure) {
-                Log.w(TAG, "Pairing offer import failed", failure);
-                error = "This pairing offer could not be used. Start pairing again on the computer.";
-            }
-            String message = error;
-            runOnUiThread(() -> {
-                if (isDestroyed()) return;
-                if (message != null) setStatus("Pairing offer not accepted", message);
-                updatePairing();
-                if (message == null && pairingCode.getVisibility() == View.VISIBLE) pairingCode.requestFocus();
-            });
-        });
+        // Settings only confirms the reset; this activity owns the approval state that must be cleared.
+        if (code == SETTINGS && result == SettingsActivity.RESULT_RESET) resetKey();
     }
 
     @Override protected void onPause() {
@@ -262,15 +193,17 @@ public final class MainActivity extends Activity {
     }
 
     private void updateDeskReader() {
-        if (deskReader.isChecked()) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (deskReaderEnabled()) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
+
+    private boolean deskReaderEnabled() { return deskSettings.getBoolean("enabled", false); }
 
     private void maybeAutoStart() {
         // pollComputer has already verified the pairing, signature, expiry and withdrawal.
         // Opening the prompt never authorizes a signature: the same CryptoObject still does.
-        if (!deskReader.isChecked() || !resumed || stopped || !hasWindowFocus()
-                || !ready || key == null || busy || active != null || networkCancellation != null
+        if (!deskReaderEnabled() || !resumed || stopped || !hasWindowFocus()
+                || !ready || key == null || busy || active != null
                 || pending == null || !pending.kind.equals("authenticate") || pending.expired()
                 || getSystemService(KeyguardManager.class).isDeviceLocked()
                 || pending.id.equals(deskSettings.getString("last_request", null))) return;
@@ -308,11 +241,7 @@ public final class MainActivity extends Activity {
         authenticate.setText(key == null ? "Prepare phone" : KdeConnectInbox.uses(awaiting) ? "Send approval again" : pending != null && pending.kind.equals("enroll")
                 ? "Approve enrollment" : "Approve request");
         enroll.setVisibility(availability == BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED ? View.VISIBLE : View.GONE);
-        reset.setEnabled(active == null && !busy);
         if (pairingConfirm != null) pairingConfirm.setEnabled(key != null && ready && !busy && !pairingBusy && active == null);
-        deskReader.setEnabled(active == null && !busy);
-        findViewById(R.id.network_toggle).setEnabled(key != null && ready && !busy && active == null);
-        findViewById(R.id.background_setup).setEnabled(!busy && active == null);
         if (!ready) setStatus("Biometrics unavailable", availability == BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED
                 ? "Enroll a fingerprint in Android settings, then return here."
                 : "Unlock your phone or resolve Android’s biometric availability, then return here.");
@@ -336,7 +265,7 @@ public final class MainActivity extends Activity {
                     showPairedComputers(paired);
                     setStatus(paired.length() > 0 ? "Waiting for computer" : "Ready for enrollment",
                             paired.length() > 0 ? "Start an authentication request on your computer."
-                                    : "On your computer, start pairing in System Settings → Navi Authenticator (or host.py enroll), then enter the code it shows.");
+                                    : "On your computer, start pairing in System Settings → Navi Authenticator (or host.py enroll), then enter the code it shows here.");
                     refresh();
                 });
             } catch (Exception error) {
@@ -678,28 +607,29 @@ public final class MainActivity extends Activity {
 
     private void showMachine(String name, String id, String label) {
         ((TextView) findViewById(R.id.machine_name)).setText(name);
-        ((TextView) findViewById(R.id.machine_identity)).setText(label + " · "
-                + id.substring(0, 4) + " " + id.substring(4, 8) + " " + id.substring(8, 12));
-        ((ImageView) findViewById(R.id.machine_icon)).setColorFilter(Color.HSVToColor(
-                new float[]{Integer.parseInt(id.substring(0, 4), 16) * 360f / 65536f, 0.40f, 0.94f}));
+        ((TextView) findViewById(R.id.machine_identity)).setText(label + " · " + groupedId(id));
+        ((ImageView) findViewById(R.id.machine_icon)).setColorFilter(machineTint(id));
         findViewById(R.id.machine_badge).setVisibility(View.VISIBLE);
+    }
+
+    /** First 12 hex digits of a computer's key hash, grouped for reading aloud. */
+    static String groupedId(String id) {
+        return id.substring(0, 4) + " " + id.substring(4, 8) + " " + id.substring(8, 12);
+    }
+
+    /** A stable per-computer icon color derived from its key hash. */
+    static int machineTint(String id) {
+        return Color.HSVToColor(new float[]{Integer.parseInt(id.substring(0, 4), 16) * 360f / 65536f, 0.40f, 0.94f});
     }
 
     private void showPairedComputers(JSONObject paired) {
         int count = paired.length();
         ((TextView) findViewById(R.id.paired_count)).setText(count == 0 ? "No paired computers"
                 : count + (count == 1 ? " paired computer" : " paired computers"));
-        StringBuilder list = new StringBuilder("PAIRED COMPUTERS");
-        java.util.Iterator<String> ids = paired.keys();
-        while (ids.hasNext()) {
-            String id = ids.next();
-            JSONObject value = paired.optJSONObject(id);
-            if (value == null || !id.matches("[a-f0-9]{64}")) continue;
-            String name = value.optString("machine_name", "Computer");
-            list.append("\n").append(name).append(" · ").append(id.substring(0, 12));
-            if (count == 1) showMachine(name, id, "Paired computer");
-        }
-        ((TextView) findViewById(R.id.paired_list)).setText(list.toString());
+        if (count != 1) return;
+        String id = paired.keys().next();
+        JSONObject value = paired.optJSONObject(id);
+        if (value != null && id.matches("[a-f0-9]{64}")) showMachine(value.optString("machine_name", "Computer"), id, "Paired computer");
     }
 
     private void resetKey() {
@@ -741,20 +671,6 @@ public final class MainActivity extends Activity {
                 .setView(scroll).setPositiveButton("Close", null).show();
     }
 
-    private void updateNetworkStatus() {
-        boolean sharingSupported = getResources().getBoolean(R.bool.kdeconnect_sharing_supported);
-        boolean received = getSharedPreferences("kdeconnect", 0).getBoolean("received", false);
-        ((TextView) findViewById(R.id.kdeconnect_status)).setText(received
-                ? "KDE Connect · signed communication is ready" : "Use your existing KDE Connect pairing");
-        findViewById(R.id.kdeconnect_status).setVisibility(sharingSupported ? View.VISIBLE : View.GONE);
-        findViewById(R.id.kdeconnect_setup).setVisibility(sharingSupported ? View.VISIBLE : View.GONE);
-        ((Button) findViewById(R.id.kdeconnect_setup)).setText(received ? "KDE Connect settings" : "Set up KDE Connect");
-        ((TextView) findViewById(R.id.network_status)).setText(NetworkService.status);
-        ((TextView) findViewById(R.id.background_summary)).setText(BackgroundSetupActivity.summary(this));
-        ((Button) findViewById(R.id.network_toggle)).setText(NetworkService.enabled(this)
-                ? "Turn off network authentication" : "Enable network authentication");
-    }
-
     private void offerBackgroundSetup() {
         if (stopped || !hasWindowFocus() || busy || active != null || pending != null || awaiting != null
                 || openedRequestId != null || !NetworkService.enabled(this)
@@ -769,93 +685,13 @@ public final class MainActivity extends Activity {
     private void startNetwork() {
         try {
             startForegroundService(new Intent(this, NetworkService.class));
-            updateNetworkStatus();
         } catch (Exception error) { report(error); }
-    }
-
-    private void toggleNetwork() {
-        if (busy || active != null || key == null || stopped) return;
-        if (NetworkService.enabled(this)) {
-            getSharedPreferences("network", 0).edit().putBoolean("enabled", false).apply();
-            stopService(new Intent(this, NetworkService.class));
-            updateNetworkStatus();
-            return;
-        }
-        busy = true;
-        refresh();
-        worker.execute(() -> {
-            try {
-                if (bridge.pairings().length() == 0) throw new IllegalStateException("Pair a computer before enabling network authentication.");
-                NetworkIdentity identity = new NetworkIdentity();
-                if (identity.approved(bridge, key)) {
-                    runOnUiThread(() -> {
-                        busy = false;
-                        refresh();
-                        if (!stopped) {
-                            getSharedPreferences("network", 0).edit().putBoolean("enabled", true).apply();
-                            startNetwork();
-                        }
-                    });
-                    return;
-                }
-                byte[] statement = identity.statement(key).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                Signature signature = key.beginSignature();
-                runOnUiThread(() -> {
-                    if (stopped) { busy = false; return; }
-                    CancellationSignal cancellation = new CancellationSignal();
-                    networkCancellation = cancellation;
-                    try {
-                        biometricPrompt().setTitle("Enable network authentication")
-                                .setSubtitle("Connect your paired computers without debugging")
-                                .setDescription("Bind this phone’s encrypted network connection to its approved signing key. Each command will still require a new biometric approval.")
-                                .setNegativeButton("Cancel", getMainExecutor(), (dialog, which) -> finishNetworkSetup(cancellation, null))
-                                .build().authenticate(new BiometricPrompt.CryptoObject(signature), cancellation,
-                                        getMainExecutor(), new BiometricPrompt.AuthenticationCallback() {
-                                    @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) {
-                                        if (networkCancellation != cancellation || stopped) return;
-                                        try {
-                                            Signature authorized = result.getCryptoObject() == null ? null : result.getCryptoObject().getSignature();
-                                            if (authorized != signature) throw new IllegalStateException("Network binding was not authorized.");
-                                            authorized.update(statement);
-                                            byte[] signed = authorized.sign();
-                                            if (!key.verify(statement, signed)) throw new IllegalStateException("Network signature did not verify.");
-                                            bridge.write("network-identity.json", new JSONObject()
-                                                    .put("payload_b64", Bridge.encode(statement)).put("signature_b64", Bridge.encode(signed)));
-                                            getSharedPreferences("network", 0).edit().putBoolean("enabled", true).apply();
-                                            finishNetworkSetup(cancellation, null);
-                                            startNetwork();
-                                        } catch (Exception error) { finishNetworkSetup(cancellation, error); }
-                                    }
-                                    @Override public void onAuthenticationError(int code, CharSequence message) {
-                                        finishNetworkSetup(cancellation, null);
-                                    }
-                                });
-                    } catch (Exception error) { finishNetworkSetup(cancellation, error); }
-                });
-            } catch (Exception error) {
-                runOnUiThread(() -> { if (!isDestroyed()) { busy = false; refresh(); report(error); } });
-            }
-        });
-    }
-
-    private void finishNetworkSetup(CancellationSignal cancellation, Exception error) {
-        if (networkCancellation != cancellation) return;
-        networkCancellation = null;
-        busy = false;
-        refresh();
-        if (error != null) report(error);
     }
 
     @Override protected void onStop() {
         stopped = true;
         handler.removeCallbacks(poll);
         if (active != null) cancel("Approval canceled", "The app left the foreground. Start a new computer request.");
-        if (networkCancellation != null) {
-            CancellationSignal cancellation = networkCancellation;
-            networkCancellation = null;
-            cancellation.cancel();
-            busy = false;
-        }
         super.onStop();
     }
 

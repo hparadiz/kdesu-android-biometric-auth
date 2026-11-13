@@ -27,7 +27,7 @@ part of the security boundary.
 
 | Component | Version / purpose |
 | --- | --- |
-| Android application | 0.9.1, API 28+, desk reader mode, code enrollment (KDE Connect, file picker, Downloads on Android 9–10), non-debuggable release |
+| Android application | 0.9.2, API 28+, desk reader mode, code enrollment (KDE Connect, guided destination setup, Downloads on Android 9–10), Settings and Paired computers screens, non-debuggable release |
 | Host CLI and native/Python authority | 0.8.0 with code enrollment over KDE Connect and device selection by name |
 | System Settings page | `kcm_navi_auth` 0.8.0: enroll, status and test per KDE Connect device |
 | KDE patch and Gentoo packages | kdesu-gui 6.7.2-r3 against kde-cli-tools 6.7.2 |
@@ -53,7 +53,7 @@ not implemented. Installing this does not reroute those authentication systems.
 ## Desk reader mode and multiple phones
 
 After enrollment and network setup, enable **Desk reader mode** in the Android
-app and leave Navi open and unlocked. The mode keeps the screen awake while Navi
+app (**☰ → Settings**) and leave Navi open and unlocked. The mode keeps the screen awake while Navi
 is visible. A verified authentication request from a paired computer automatically
 opens the biometric prompt, so a face-down Nexus 6P can work through its rear
 fingerprint sensor alone.

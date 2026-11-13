@@ -80,8 +80,9 @@ Kirigami.Dialog {
             wrapMode: Text.Wrap
             font: Kirigami.Theme.smallFont
             opacity: 0.8
-            text: i18n("No code box in Navi? The offer went to the phone's Downloads: open it with Navi from KDE Connect's "
-                     + "notification, or tap <b>Pair a computer…</b> → <b>Open pairing offer…</b> in Navi and choose <tt>%1</tt>.",
+            text: i18n("No code box in Navi? KDE Connect isn't delivering to Navi yet. On the phone open Navi → <b>☰</b> → "
+                     + "<b>Settings</b> → <b>Set up KDE Connect</b>, then Cancel here and press <b>Enroll</b> again. "
+                     + "(Opening <tt>%1</tt> from Downloads with Navi shows the same steps.)",
                        kcm.offerFile.length > 0 ? kcm.offerFile : "navi-auth-enroll-offer-….json")
         }
         QQC2.BusyIndicator {

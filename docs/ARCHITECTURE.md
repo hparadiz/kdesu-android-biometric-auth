@@ -76,9 +76,13 @@ types into the phone, carried over an existing KDE Connect pairing:
 Offers from other paired devices or apps cannot match the code the user is
 reading, and all messages stay inside KDE Connect's paired channel, so the short
 code is not exposed to offline guessing. Delivery to the phone is automatic with
-Navi as the KDE Connect destination (Android 10+). Otherwise the user opens the
-saved offer with Navi or the file picker (offers only), and on Android 9–10 Navi
-can import recent `navi-auth-*.json` files from `Download/` while it is open. On
+Navi as the KDE Connect destination (Android 10+). On Android 9–10 Navi can
+instead import recent `navi-auth-*.json` files from `Download/` while it is open.
+A saved offer the user opens with Navi or the file picker (offers only) is fully
+validated, but it is stored for code entry only when Navi can follow the rest of
+the enrollment from Downloads. Otherwise (Android 11+, or no storage access) Navi
+discards it and shows the KDE Connect destination setup, because the enrollment
+request would land where Navi cannot read it. On
 Android 9 the documents provider only serves Navi's outgoing replies and is not
 offered as a destination folder.
 
@@ -182,8 +186,8 @@ exact configuration digest is rechecked at commit. A change before commit preven
 execution; an already committed command is not undone. Stopping phone notifications
 alone is not revocation.
 
-The current phone UI lists paired computers and supports **Reset key and all
-pairings**. That reset affects every computer and invalidates existing enrollment;
+The current phone UI lists paired computers (**☰ → Paired computers**) and
+supports **Reset key and all pairings** (**☰ → Settings**). That reset affects every computer and invalidates existing enrollment;
 there is no polished per-computer forget workflow yet.
 
 ## KDE Connect options

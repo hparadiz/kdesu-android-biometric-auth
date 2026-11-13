@@ -78,23 +78,68 @@ final class KdeConnectInbox {
         activity.startActivity(share);
     }
 
-    /**
-     * A pairing offer the user opened themselves (file picker, "Open with", Share). Only offers are
-     * accepted on this path; they stay untrusted until the code shown on the computer is typed.
-     */
-    static void receiveOfferFile(Context context, byte[] bytes) throws Exception {
-        if (bytes.length > MAX_FILE) throw new IllegalArgumentException("This file is too large to be a Navi pairing offer.");
-        JSONObject mail;
-        try {
-            mail = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
-        } catch (Exception error) {
-            throw new IllegalArgumentException("This is not a Navi pairing offer.");
+    /** Outcome of a pairing offer the user opened themselves (file picker, "Open with", Share). */
+    static final class ImportResult {
+        enum Kind { ACCEPTED, NEEDS_SETUP, ERROR }
+        final Kind kind;
+        final String machineName, message;
+        private ImportResult(Kind kind, String machineName, String message) {
+            this.kind = kind;
+            this.machineName = machineName;
+            this.message = message;
         }
-        String id = mail.optString("request_id");
-        if (!Challenge.DOMAIN.equals(mail.optString("domain")) || !"kdeconnect-mail".equals(mail.optString("kind"))
-                || !id.matches("[a-f0-9]{32}") || !"enroll-offer.json".equals(mail.optString("name")))
-            throw new IllegalArgumentException("This is not a Navi pairing offer. Choose the navi-auth-enroll-offer file.");
-        storeOffer(context, mail, id);
+    }
+
+    /**
+     * True when Navi can read later computer messages from Download/ (Android 9-10 with storage
+     * access). Otherwise an offer found in Downloads means the rest of the enrollment would be lost.
+     */
+    static boolean canFollowFromDownloads(Context context) {
+        return Build.VERSION.SDK_INT <= 29
+                && context.checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** System file picker for a navi-auth-enroll-offer file, opening in Downloads. */
+    static Intent offerPicker() {
+        return new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/json", "text/plain", "application/octet-stream"})
+                .putExtra(DocumentsContract.EXTRA_INITIAL_URI,
+                        Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload"));
+    }
+
+    /**
+     * Imports a pairing offer the user picked or opened. Only offers are accepted on this path and they
+     * stay untrusted until the computer's code is typed. The offer is always fully validated; it is stored
+     * only when Navi can also follow the rest of the enrollment, otherwise the user must finish the
+     * KDE Connect setup and start again. Call on a background thread.
+     */
+    static ImportResult importOffer(Context context, Uri uri) {
+        try {
+            byte[] bytes = readDocument(context, uri);
+            JSONObject mail;
+            try {
+                mail = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            } catch (Exception error) {
+                throw new IllegalArgumentException("This is not a Navi pairing offer.");
+            }
+            String id = mail.optString("request_id");
+            if (!Challenge.DOMAIN.equals(mail.optString("domain")) || !"kdeconnect-mail".equals(mail.optString("kind"))
+                    || !id.matches("[a-f0-9]{32}") || !"enroll-offer.json".equals(mail.optString("name")))
+                throw new IllegalArgumentException("This is not a Navi pairing offer. Choose the navi-auth-enroll-offer file.");
+            JSONObject offer = mail.getJSONObject("value");
+            JSONObject payload = PairingCode.validateOffer(offer);
+            if (!id.equals(payload.getString("session_id"))) throw new IllegalArgumentException("Offer does not match its delivery name.");
+            String name = payload.getString("machine_name");
+            if (!canFollowFromDownloads(context)) return new ImportResult(ImportResult.Kind.NEEDS_SETUP, name, null);
+            PairingCode.receiveOffer(context, offer);
+            return new ImportResult(ImportResult.Kind.ACCEPTED, name, null);
+        } catch (IllegalArgumentException invalid) {
+            return new ImportResult(ImportResult.Kind.ERROR, null, invalid.getMessage());
+        } catch (Exception failure) {
+            Log.w("PhoneAuthenticator", "Pairing offer import failed", failure);
+            return new ImportResult(ImportResult.Kind.ERROR, null,
+                    "This pairing offer could not be used. Start pairing again on the computer.");
+        }
     }
 
     private static void storeOffer(Context context, JSONObject mail, String id) throws Exception {

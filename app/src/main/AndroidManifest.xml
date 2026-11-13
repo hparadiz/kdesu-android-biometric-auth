@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="in.akuj.fingerprint"
-    android:versionCode="14"
-    android:versionName="0.9.1">
+    android:versionCode="15"
+    android:versionName="0.9.2">
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="34" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.USE_FINGERPRINT" android:maxSdkVersion="29" />
@@ -35,6 +35,9 @@
             </intent-filter>
         </receiver>
         <activity android:name=".BackgroundSetupActivity" android:exported="false" />
+        <activity android:name=".SettingsActivity" android:exported="false" android:label="Settings" />
+        <activity android:name=".PairedComputersActivity" android:exported="false" android:label="Paired computers" />
+        <activity android:name=".KdeConnectSetupActivity" android:exported="false" android:label="Set up KDE Connect" />
         <provider android:name=".AuthDocumentsProvider" android:authorities="in.akuj.fingerprint.documents"
             android:exported="true" android:grantUriPermissions="true" android:permission="android.permission.MANAGE_DOCUMENTS">
             <intent-filter><action android:name="android.content.action.DOCUMENTS_PROVIDER" /></intent-filter>

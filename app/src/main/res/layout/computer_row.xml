@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:orientation="horizontal" android:gravity="center_vertical"
+    android:background="@drawable/machine_panel" android:layout_marginTop="12dp">
+    <ImageView android:id="@+id/computer_icon" android:layout_width="40dp" android:layout_height="40dp"
+        android:src="@drawable/ic_computer" android:importantForAccessibility="no" />
+    <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+        android:orientation="vertical" android:layout_marginStart="14dp">
+        <TextView android:id="@+id/computer_name" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:textSize="20sp" android:fontFamily="sans-serif-medium" android:textColor="@color/navi_text" />
+        <TextView android:id="@+id/computer_identity" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="4dp" android:textSize="12sp" android:textColor="@color/navi_secondary"
+            android:fontFamily="monospace" android:textIsSelectable="true" />
+    </LinearLayout>
+</LinearLayout>

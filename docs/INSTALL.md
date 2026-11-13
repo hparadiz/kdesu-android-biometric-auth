@@ -51,8 +51,18 @@ copy it to the phone and install it there. ADB is not needed after installation.
 ### With a pairing code (release build)
 
 1. Pair the phone with this computer in KDE Connect and leave file sharing enabled.
-2. In Navi, tap **Set up KDE Connect** and choose **Navi Authenticator** as KDE
-   Connect's destination folder. Open Navi once so it prepares its signing key.
+2. Open Navi once so it prepares its signing key. Then make KDE Connect deliver
+   Navi's files to Navi (Navi shows these steps under **☰ → Settings → Set up
+   KDE Connect**):
+   1. In KDE Connect, tap the computer.
+   2. Tap **⋮** (top right) → **Plugin settings**.
+   3. Tap **Share and receive** (its name or gear) → **Customize destination
+      directory**.
+   4. In the folder picker, tap **☰** → **Navi Authenticator** → **Use this
+      folder** → **Allow**.
+
+   Other shared files still go to Downloads. Android 9 has no such option; see
+   *Android 9–10 without ADB* below.
 3. On the computer, either open **System Settings → Security & Privacy → Navi
    Authenticator**, press **Create Identity** once and then **Enroll** next to the
    phone, or use the terminal:
@@ -68,11 +78,14 @@ copy it to the phone and install it there. ADB is not needed after installation.
    and tap **Confirm code**. KDE Connect returns the phone's key to the computer.
 
    **No code box?** Then KDE Connect saved the offer to the phone's Downloads
-   (step 2 was skipped). Either tap KDE Connect's "file received" notification and
-   open it with **Navi pairing offer**, or in Navi tap **Pair a computer… → Open
-   pairing offer…** and choose the `navi-auth-enroll-offer-….json` file the
-   computer names. Only pairing offers are accepted this way, and they still need
-   the code. Navi shows the same instructions until a computer is paired.
+   (step 2 is not done). Do step 2, cancel on the computer and press **Enroll**
+   again. If you open the offer file anyway (KDE Connect's "file received"
+   notification → **Navi pairing offer**, or Navi **☰ → Paired computers → Open
+   Pairing Offer…**), Navi checks it and opens **Finish KDE Connect setup** naming
+   the computer. It does not show a code box then, because the enrollment request
+   that follows would land in Downloads too, where Android 11+ does not let Navi
+   read it. On Android 9–10 with Downloads access (below) the offer is accepted
+   and the code box appears.
 5. Navi then shows the enrollment request. Tap **Approve enrollment** and complete
    the biometric prompt. The terminal prints `ENROLLED`; System Settings marks the
    phone **Enrolled**. Press **Send Test** (or run `python3 host.py authenticate`)
@@ -86,9 +99,10 @@ minutes, and five wrong entries discard it.
 
 ### Android 9–10 without ADB (e.g. Nexus 6P)
 
-KDE Connect on these versions saves received files to `Download/`. In Navi tap
-**Read computer messages from Downloads** and allow storage access (only
-requested on Android 9–10). Keep Navi open during enrollment: it checks
+KDE Connect on Android 9 always saves received files to `Download/` (Android 10
+also offers the destination folder from step 2). In Navi open **☰ → Settings →
+Set up KDE Connect**, tap **Read computer messages from Downloads** and allow
+storage access (only requested on Android 9–10). Keep Navi open during enrollment: it checks
 `Download/` when it opens, regains focus and every few seconds while visible,
 handles recent `navi-auth-*.json` files exactly like KDE Connect deliveries, and
 deletes them. Enroll as above. Afterwards configure kdesu with the LAN transport
@@ -150,7 +164,8 @@ Expected: `package not debuggable`. Disable/revoke development debugging access
 when it is no longer needed. Direct Wi-Fi authentication continues without ADB.
 See [SECURITY.md](../SECURITY.md) for the remaining app-update signing risk.
 
-For a stationary rear-sensor phone, turn on **Desk reader mode** and leave Navi
+For a stationary rear-sensor phone, turn on **Desk reader mode** (**☰ →
+Settings**) and leave Navi
 open and unlocked. Incoming authentication requests open the biometric prompt
 automatically; the screen stays awake while Navi is visible. Canceled requests
 do not reopen themselves. This does not start the app from the background or

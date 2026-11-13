@@ -56,8 +56,11 @@ final class PairingCode {
         return mac.doFinal(payload);
     }
 
-    /** Called for a KDE Connect delivery; validates the machine signature before storing. */
-    static void receiveOffer(Context context, JSONObject offer) throws Exception {
+    /**
+     * Checks an offer's machine signature, certificate, fields and lifetime without storing it.
+     * Returns the signed payload; "machine_id" is the verified certificate's key hash.
+     */
+    static JSONObject validateOffer(JSONObject offer) throws Exception {
         byte[] bytes = Bridge.decode(offer.getString("payload_b64"));
         JSONObject payload = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
         X509Certificate machine = Bridge.certificate(offer.getString("machine_certificate_b64"));
@@ -77,6 +80,18 @@ final class PairingCode {
                 || issued > now + CLOCK_SKEW_MS || expires <= now || expires - issued > MAX_LIFETIME_MS
                 || Bridge.decode(offer.getString("code_tag_b64")).length != 32)
             throw new IllegalArgumentException("Invalid computer pairing offer.");
+        return payload;
+    }
+
+    /** Called for a KDE Connect delivery; validates the machine signature before storing. */
+    static void receiveOffer(Context context, JSONObject offer) throws Exception {
+        JSONObject payload = validateOffer(offer);
+        String machineId = payload.getString("machine_id");
+        String session = payload.getString("session_id");
+        String name = payload.getString("machine_name");
+        String desktop = payload.getString("desktop_device_id");
+        long now = System.currentTimeMillis();
+        long expires = payload.getLong("expires_at_ms");
         synchronized (Bridge.MAILBOX) {
             Bridge bridge = new Bridge(context);
             JSONObject state = load(bridge);
