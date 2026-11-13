@@ -40,6 +40,11 @@ class NaviAuthKcm : public KQuickConfigModule
     Q_PROPERTY(QString authorityProblem READ authorityProblem NOTIFY statusChanged)
     Q_PROPERTY(bool kdesuWithoutNavi READ kdesuWithoutNavi NOTIFY statusChanged)
     Q_PROPERTY(bool canEnableAdministratorPrompts READ canEnableAdministratorPrompts CONSTANT)
+    /** Optional sudo approval: empty when not built in, else enabled | disabled | misplaced | outdated | unrecognized | unreadable. */
+    Q_PROPERTY(QString sudoApproval READ sudoApproval NOTIFY statusChanged)
+    Q_PROPERTY(bool canChangeSudoApproval READ canChangeSudoApproval CONSTANT)
+    /** Was turned on here, but /etc/pam.d/sudo no longer has the line (e.g. replaced by a sudo update). */
+    Q_PROPERTY(bool sudoApprovalLost READ sudoApprovalLost NOTIFY statusChanged)
 
 public:
     NaviAuthKcm(QObject *parent, const KPluginMetaData &data);
@@ -72,6 +77,9 @@ public:
     bool kdesuWithoutNavi() const;
     /** pkexec and the installed polkit entry point exist. */
     bool canEnableAdministratorPrompts() const;
+    QString sudoApproval() const;
+    bool canChangeSudoApproval() const;
+    bool sudoApprovalLost() const;
 
     Q_INVOKABLE void refresh();
     Q_INVOKABLE void initialize();
@@ -86,6 +94,8 @@ public:
     Q_INVOKABLE void enableAdministratorPrompts(const QString &deviceId);
     /** Disables the phone for administrator prompts; the helper allows this without a password. */
     Q_INVOKABLE void disableAdministratorPrompts(const QString &deviceId);
+    /** Adds or removes Navi's line in /etc/pam.d/sudo (administrator password via polkit). */
+    Q_INVOKABLE void setSudoApproval(bool enabled);
     Q_INVOKABLE void cancel();
     Q_INVOKABLE void clearMessages();
     Q_INVOKABLE QString authorityCommand(const QString &deviceId) const;

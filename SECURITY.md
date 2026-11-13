@@ -100,6 +100,16 @@ boundary preventing direct helper invocation.
   drop messages (availability, not authorization). The optional ntfy access token
   is sent to Navi inside the signed setup request over KDE Connect. See
   [Remote approvals](docs/REMOTE.md).
+- **Optional sudo approval:** built only with `USE=sudo` / `ENABLE_SUDO=yes` and
+  active only after an administrator adds a `pam_exec` line to `/etc/pam.d/sudo`.
+  The helper runs as root inside sudo and offers the phone only for
+  `PAM_SERVICE=sudo` on a pseudo-terminal whose process ancestry contains Konsole
+  or Kitty owned by the user and no `sshd`. That check limits *where* the phone is
+  offered; it is not a boundary against code already running as the user, who
+  could open such a terminal. The fingerprint approval is the gate, and any
+  failure falls back to the password. The command shown on the phone is sudo's
+  own argument list, a display hint: sudo still applies sudoers, aliases and
+  `-s`/`-i` semantics. Approval is recorded without execution (no execution PID).
 - **Biometric modality:** Android selects strength, not exclusively fingerprint.
   Locally observed hardware enforcement is not independently verified attestation.
 - **Availability:** the LAN service adds network-facing code. Frames, workers and

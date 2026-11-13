@@ -16,7 +16,7 @@ DEPEND="dev-qt/qtbase:6[dbus,gui]
     kde-frameworks/kcoreaddons:6
     kde-frameworks/ki18n:6"
 RDEPEND="${DEPEND}
-    =sys-auth/navi-auth-${PV}
+    >=sys-auth/navi-auth-0.9.0
     kde-frameworks/kirigami:6
     kde-misc/kdeconnect"
 BDEPEND="kde-frameworks/extra-cmake-modules:0"
@@ -32,6 +32,7 @@ src_configure() {
         -DNAVI_AUTH_CONFIGURE=/usr/libexec/navi-auth/configure-authority.py
         -DNAVI_AUTH_PYTHON=/usr/bin/python3
         -DNAVI_AUTH_POLKIT_CONFIGURE=/usr/libexec/navi-auth/configure
+        -DNAVI_AUTH_SUDO_PAM=/usr/libexec/navi-auth/sudo-pam
     )
     cmake_src_configure
 }

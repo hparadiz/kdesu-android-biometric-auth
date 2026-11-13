@@ -244,7 +244,7 @@ location = /var/db/repos/kdesu-biometric-source/packaging/kde-repo
 masters = gentoo
 auto-sync = no
 EOF
-ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.9.0.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.10.0.ebuild manifest
 ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/kde-misc/navi-auth-kcm/navi-auth-kcm-0.9.0.ebuild manifest
 ebuild /var/db/repos/kdesu-biometric-source/packaging/kde-repo/kde-plasma/kdesu-gui/kdesu-gui-6.8.2-r1.ebuild manifest
 # Keep Plasma upgrades from silently replacing the Navi-patched kdesu with Gentoo's:
@@ -252,7 +252,7 @@ ebuild /var/db/repos/kdesu-biometric-source/packaging/kde-repo/kde-plasma/kdesu-
 install -d -m 0755 /etc/portage/package.mask
 echo 'kde-plasma/kdesu-gui::gentoo' > /etc/portage/package.mask/navi-kdesu
 emerge --pretend --verbose --oneshot \
-  '=sys-auth/navi-auth-0.9.0::navi-auth-local' \
+  '=sys-auth/navi-auth-0.10.0::navi-auth-local' \
   '=kde-misc/navi-auth-kcm-0.9.0::navi-auth-local' \
   '=kde-plasma/kdesu-gui-6.8.2-r1::navi-kde-local'
 ```
@@ -264,7 +264,7 @@ After accepting the exact plan:
 
 ```sh
 emerge --ask=n --oneshot --usepkg=n --getbinpkg=n --autounmask=n \
-  '=sys-auth/navi-auth-0.9.0::navi-auth-local' \
+  '=sys-auth/navi-auth-0.10.0::navi-auth-local' \
   '=kde-misc/navi-auth-kcm-0.9.0::navi-auth-local' \
   '=kde-plasma/kdesu-gui-6.8.2-r1::navi-kde-local'
 ```
@@ -363,6 +363,50 @@ For commands that invoke scripts, approval of a path does not freeze its content
 Execute the same verified bytes or a protected snapshot. Hashing and subsequently
 reopening a writable path leaves a race. Keep commands within 512 characters and
 preserve the exact command for review; do not hide large payloads in encodings.
+
+## 8. Approving sudo from the phone (optional)
+
+Off unless you build it in. When enabled, `sudo` typed in a **local Konsole or
+Kitty** terminal asks the enrolled phone first; declining, a 60-second timeout,
+Ctrl-C or an unreachable phone falls back to the normal password prompt. SSH
+sessions, other terminals, the Linux console, `su`, `pkexec`, Discover/systemd
+(polkit) prompts, login and the screen locker are not affected. kdesu keeps its
+own route.
+
+1. Install the helper:
+   - Gentoo: `USE=sudo` for `sys-auth/navi-auth` (for example
+     `echo 'sys-auth/navi-auth sudo' >> /etc/portage/package.use/navi-auth`), then re-emerge.
+   - Other systems: `make && sudo make install ENABLE_SUDO=yes`
+     (`SUDO_TERMINALS` and `SUDO_TIMEOUT` change the allowed terminals and the timeout).
+
+   This installs `/usr/libexec/navi-auth/sudo-approve` and `sudo_approve.py`
+   but changes no PAM configuration.
+2. Turn it on: **System Settings → Navi Authenticator → Approve sudo from the
+   phone in local Konsole and Kitty terminals** (asks for the administrator
+   password), or as root `/usr/libexec/navi-auth/sudo-pam enable`. Keep a root
+   shell open the first time. This adds one marked line to `/etc/pam.d/sudo`
+   above the password rules:
+
+   ```
+   auth	sufficient	pam_exec.so quiet stdout seteuid /usr/libexec/navi-auth/sudo-approve
+   ```
+
+   The original file is backed up to `/var/lib/navi-auth/pam-sudo.backup`, the new
+   one is written atomically and checked, and files without auth rules are refused.
+   `sudo-pam status` shows the state; `sudo-pam disable` (or the switch) removes
+   only that line. If a sudo update replaces the file, System Settings and
+   `host.py authority-status` say so and **Repair** restores it.
+3. In a new Konsole tab run `sudo echo 1`, approve in Navi, and expect `1`.
+   Decline once and check that the password prompt appears. Check
+   `ssh localhost sudo -v` still asks for the password.
+   `journalctl -t navi-auth` records each decision (`sudo-start`,
+   `sudo-approved`, `sudo-skipped: …`).
+
+Phone approval requires the account that is configured for administrator
+prompts (System Settings → **Administrator prompts**). sudo's usual timestamp
+applies afterwards, so further sudo calls in that terminal within a few minutes
+do not ask again. To turn it off, use the switch or `sudo-pam disable`; to remove
+the helper, turn it off first, then rebuild without `USE=sudo` / `ENABLE_SUDO=yes`.
 
 ## Revocation, removal and recovery
 

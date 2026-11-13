@@ -12,7 +12,7 @@ S="${WORKDIR}"
 LICENSE="MIT"
 SLOT="0"
 KEYWORDS="amd64"
-IUSE=""
+IUSE="sudo"
 REQUIRED_USE="${PYTHON_REQUIRED_USE}"
 
 RDEPEND="${PYTHON_DEPS}
@@ -21,21 +21,21 @@ RDEPEND="${PYTHON_DEPS}
     dev-python/pygobject[${PYTHON_USEDEP}]
     kde-misc/kdeconnect
     sys-auth/polkit
-    dev-qt/qttools:6[qdbus]"
+    dev-qt/qttools:6[qdbus]
+    sudo? ( app-admin/sudo sys-libs/pam )"
+
+src_unpack() {
+    # The reviewed sources are carried in this repository's files/ directory.
+    cp -r "${FILESDIR}"/. "${S}"/ || die
+}
 
 src_compile() {
-    $(tc-getCC) ${CFLAGS} ${LDFLAGS} -fPIE -pie -Wl,-z,relro,-z,now \
-        -o authorize "${FILESDIR}/authorize.c" || die
+    emake CC="$(tc-getCC)" authorize
 }
 
 src_install() {
-    exeinto /usr/libexec/navi-auth
-    doexe "${FILESDIR}/rootauth.py" "${FILESDIR}/host.py" "${FILESDIR}/configure-authority.py" "${FILESDIR}/kdeconnect_transport.py" "${FILESDIR}/ntfy_transport.py"
-    doexe authorize
-    # polkit entry point for "Administrator prompts" in System Settings.
-    newexe "${FILESDIR}/navi-auth-configure" configure
-    insinto /usr/share/polkit-1/actions
-    doins "${FILESDIR}/in.akuj.navi-auth.policy"
+    # USE=sudo installs the optional sudo approval helper; PAM configuration is never edited.
+    emake DESTDIR="${D}" POLKIT_SRC=. ENABLE_SUDO=$(usex sudo yes no) install
     fperms 4755 /usr/libexec/navi-auth/authorize
 }
 
@@ -46,5 +46,14 @@ pkg_postinst() {
         ewarn "cannot import cryptography, dbus and gi. Administrator prompts and the settings page"
         ewarn "will fail until the default Python (eselect python) is listed in PYTHON_TARGETS"
         ewarn "and navi-auth's dependencies are rebuilt for it."
+    fi
+    if use sudo; then
+        elog "Phone approval for sudo is installed but not active. Turn it on in"
+        elog "System Settings -> Navi Authenticator (asks for the administrator password),"
+        elog "or as root: /usr/libexec/navi-auth/sudo-pam enable"
+        elog "It adds one line to /etc/pam.d/sudo; 'sudo-pam disable' removes it."
+        elog "Only sudo in local Konsole/Kitty terminals is affected; SSH, other terminals,"
+        elog "su, pkexec and polkit prompts keep using passwords. If an app-admin/sudo update"
+        elog "replaces /etc/pam.d/sudo, System Settings offers to restore the line."
     fi
 }

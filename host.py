@@ -1007,18 +1007,47 @@ def kdesu_navi_enabled(path=KDESU):
     return KDESU_MARKER.encode("utf-16-le") in data or KDESU_MARKER.encode() in data
 
 
+def sudo_approval_state():
+    """Optional sudo approval (built with USE=sudo / ENABLE_SUDO=yes): None when not installed,
+    else the state of /etc/pam.d/sudo: enabled | disabled | misplaced | outdated | unrecognized | unreadable."""
+    module_path = Path(__file__).resolve().with_name("sudo_pam.py")
+    if not module_path.exists() or not module_path.with_name("sudo-approve").exists():
+        return None  # Not built in (or a source checkout without the installed helper).
+    try:
+        spec = importlib.util.spec_from_file_location("navi_sudo_pam", module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.status()["state"]
+    except Exception:
+        return "unreadable"
+
+
+SUDO_STATE_TEXT = {
+    "enabled": "on (local Konsole/Kitty)",
+    "disabled": "installed but off",
+    "misplaced": "NEEDS REPAIR: the line is below the password rule in /etc/pam.d/sudo",
+    "outdated": "NEEDS REPAIR: the line in /etc/pam.d/sudo is not the expected one (e.g. missing seteuid)",
+    "unrecognized": "cannot be turned on: /etc/pam.d/sudo has no auth rules",
+    "unreadable": "unknown: /etc/pam.d/sudo could not be read",
+}
+
+
 def authority_status():
     reply, error = authority_request("status")
+    sudo = sudo_approval_state()
     if reply is None:
-        emit("authority", available=False, error=error)
+        emit("authority", available=False, error=error, sudo_approval=sudo)
         say(error)
         return
     status = {name: reply.get(name) for name in ("configured", "valid", "reason", "account_matches", "enabled",
                                                  "machine_key_id", "phones") if name in reply}
     kdesu_navi = kdesu_navi_enabled()
-    emit("authority", available=True, kdesu_navi=kdesu_navi, **status)
+    emit("authority", available=True, kdesu_navi=kdesu_navi, sudo_approval=sudo, **status)
     if JSON_MODE:
         return
+    if sudo is not None:
+        print("Phone approval for sudo:", SUDO_STATE_TEXT.get(sudo, sudo)
+              + (" (repair: System Settings → Navi Authenticator, or sudo-pam enable as root)" if sudo in ("misplaced", "outdated") else ""))
     if not status.get("configured"):
         print("Administrator prompts: not configured on this computer.")
     elif not status.get("valid"):

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- SPDX-License-Identifier: MIT -->
+<!-- Installed only when built with sudo approval (USE=sudo / make install ENABLE_SUDO=yes). -->
+<policyconfig>
+  <vendor>Navi Authenticator</vendor>
+  <action id="in.akuj.navi-auth.configure-sudo">
+    <description>Turn phone approval for sudo on or off</description>
+    <message>Authentication is required to change how sudo authenticates in local Konsole and Kitty terminals</message>
+    <icon_name>fingerprint</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <!-- Always ask; authentication changes are never cached. -->
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/navi-auth/sudo-pam</annotate>
+  </action>
+</policyconfig>

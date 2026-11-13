@@ -12,6 +12,7 @@
 #include <QJsonObject>
 #include <QFileInfo>
 #include <QProcessEnvironment>
+#include <QSettings>
 #include <QStandardPaths>
 
 #include <algorithm>
@@ -52,6 +53,22 @@ QString pkexec()
 QString polkitConfigure()
 {
     return environmentOr("NAVI_AUTH_POLKIT_CONFIGURE", NAVI_AUTH_POLKIT_CONFIGURE_DEFAULT);
+}
+
+QString sudoPam()
+{
+    return environmentOr("NAVI_AUTH_SUDO_PAM", NAVI_AUTH_SUDO_PAM_DEFAULT);
+}
+
+bool pkexecTask(const QString &task)
+{
+    return task == QLatin1String("authority-enable") || task == QLatin1String("sudo-enable") || task == QLatin1String("sudo-disable");
+}
+
+QSettings uiState()
+{
+    // Remembers only that sudo approval was turned on here, to notice when a sudo update removes it.
+    return QSettings(QStringLiteral("navi-auth"), QStringLiteral("kcm"));
 }
 
 QString quoted(const QString &value)
@@ -287,6 +304,30 @@ void NaviAuthKcm::disableAdministratorPrompts(const QString &deviceId)
     }
 }
 
+QString NaviAuthKcm::sudoApproval() const
+{
+    return m_authority.value(QStringLiteral("sudo_approval")).toString();
+}
+
+bool NaviAuthKcm::canChangeSudoApproval() const
+{
+    return !QStandardPaths::findExecutable(pkexec()).isEmpty() && QFileInfo(sudoPam()).isExecutable();
+}
+
+bool NaviAuthKcm::sudoApprovalLost() const
+{
+    return sudoApproval() == QLatin1String("disabled") && uiState().value(QStringLiteral("sudoApprovalWanted")).toBool();
+}
+
+void NaviAuthKcm::setSudoApproval(bool enabled)
+{
+    if (sudoApproval().isEmpty() || !canChangeSudoApproval()) {
+        return;
+    }
+    startProcess(enabled ? QStringLiteral("sudo-enable") : QStringLiteral("sudo-disable"), QString(), pkexec(),
+                 {sudoPam(), enabled ? QStringLiteral("enable") : QStringLiteral("disable")});
+}
+
 bool NaviAuthKcm::authorityAvailable() const
 {
     return m_authority.value(QStringLiteral("available")).toBool();
@@ -441,13 +482,14 @@ void NaviAuthKcm::taskExited(int exitCode, QProcess::ExitStatus status)
     }
     m_expiryTimer.stop();
     const QString task = m_task;
-    if (task == QLatin1String("authority-enable") && status == QProcess::NormalExit) {
+    if (pkexecTask(task) && status == QProcess::NormalExit) {
         // pkexec: 126 = authentication dialog dismissed, 127 = not authorized; otherwise the configurator's exit.
         m_taskDone = exitCode == 0;
         if (exitCode == 126) {
             exitCode = 130; // treated as a quiet cancel below
         } else if (exitCode == 127) {
-            m_taskError = i18n("Not authorized to change administrator prompts.");
+            m_taskError = task == QLatin1String("authority-enable") ? i18n("Not authorized to change administrator prompts.")
+                                                                     : i18n("Not authorized to change how sudo authenticates.");
         } else if (exitCode != 0) {
             const QStringList lines = standardError.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
             m_taskError = lines.isEmpty() ? QString() : lines.last();
@@ -476,6 +518,12 @@ void NaviAuthKcm::taskExited(int exitCode, QProcess::ExitStatus status)
                 : i18n("%1 can no longer approve requests from this account.", m_taskDeviceName);
         } else if (task == QLatin1String("authority-revoke")) {
             result = i18n("%1 can no longer approve administrator prompts.", m_taskDeviceName);
+        } else if (task == QLatin1String("sudo-enable")) {
+            result = i18n("sudo in local Konsole and Kitty terminals now asks your phone first; the password stays as the fallback.");
+            uiState().setValue(QStringLiteral("sudoApprovalWanted"), true);
+        } else if (task == QLatin1String("sudo-disable")) {
+            result = i18n("sudo asks for your password again, as before.");
+            uiState().setValue(QStringLiteral("sudoApprovalWanted"), false);
         } else if (task == QLatin1String("authority-enable")) {
             result = i18n("%1 can now approve administrator prompts for this account.", m_taskDeviceName);
         } else {

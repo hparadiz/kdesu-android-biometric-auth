@@ -23,6 +23,7 @@ set(NAVI_AUTH_HOST "/usr/libexec/navi-auth/host.py" CACHE STRING "Installed host
 set(NAVI_AUTH_CONFIGURE "/usr/libexec/navi-auth/configure-authority.py" CACHE STRING "Installed configurator")
 set(NAVI_AUTH_PYTHON "/usr/bin/python3" CACHE STRING "Interpreter for host.py")
 set(NAVI_AUTH_POLKIT_CONFIGURE "/usr/libexec/navi-auth/configure" CACHE STRING "pkexec entry point for the configurator")
+set(NAVI_AUTH_SUDO_PAM "/usr/libexec/navi-auth/sudo-pam" CACHE STRING "pkexec entry point for the optional sudo approval switch")
 
 add_definitions(-DTRANSLATION_DOMAIN=\"kcm_navi_auth\")
 
@@ -31,7 +32,8 @@ target_compile_definitions(kcm_navi_auth PRIVATE
     NAVI_AUTH_HOST_DEFAULT="${NAVI_AUTH_HOST}"
     NAVI_AUTH_CONFIGURE_DEFAULT="${NAVI_AUTH_CONFIGURE}"
     NAVI_AUTH_PYTHON_DEFAULT="${NAVI_AUTH_PYTHON}"
-    NAVI_AUTH_POLKIT_CONFIGURE_DEFAULT="${NAVI_AUTH_POLKIT_CONFIGURE}")
+    NAVI_AUTH_POLKIT_CONFIGURE_DEFAULT="${NAVI_AUTH_POLKIT_CONFIGURE}"
+    NAVI_AUTH_SUDO_PAM_DEFAULT="${NAVI_AUTH_SUDO_PAM}")
 target_link_libraries(kcm_navi_auth PRIVATE
     Qt::Core Qt::DBus Qt::Gui Qt::Quick
     KF6::CoreAddons KF6::I18n KF6::KCMUtilsQuick)

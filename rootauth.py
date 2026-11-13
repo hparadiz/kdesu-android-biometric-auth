@@ -71,12 +71,15 @@ def trusted_file(path, private=False, limit=MAX_MESSAGE):
 
 
 IMPLEMENTATION = ("rootauth.py", "host.py", "kdeconnect_transport.py", "ntfy_transport.py")
+# Installed only when built with sudo approval (make ENABLE_SUDO=yes / USE=sudo).
+OPTIONAL_IMPLEMENTATION = ("sudo_approve.py",)
 
 
 def check_implementation(directory=None):
     """The installed program files must be root-owned and not writable by others."""
     directory = directory or Path(__file__).resolve().parent
-    for name in IMPLEMENTATION:
+    optional = tuple(name for name in OPTIONAL_IMPLEMENTATION if (directory / name).exists())
+    for name in IMPLEMENTATION + optional:
         source = directory / name
         trusted_file(source, limit=MAX_IMPLEMENTATION)
         info = source.parent.stat()
@@ -141,9 +144,23 @@ def validate_start(event, peer_uid, account):
     context.update(action_id="org.kde.kdesu.run", command_hidden=False, requesting_user=account.pw_name,
                    requesting_uid=peer_uid, target_user="root", source="kdesu", requester_pid=requester_pid,
                    icon_png_base64=encoded, mode="execute", desktop_request_id=event["request_id"])
-    environment = event["environment"]
-    if not isinstance(environment, dict) or set(environment) - {
-            "DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XAUTHORITY"}:
+    environment = validate_environment(event["environment"], peer_uid)
+    # Environment that can change executable/library/config lookup is never inherited.
+    execution_env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root", "USER": "root", "LOGNAME": "root",
+                     "LANG": "C.UTF-8", "KDESU_USER": account.pw_name}
+    execution_env.update(environment)
+    cwd = plain(event["cwd"], 4096, "working directory")
+    if not cwd.startswith("/") or not Path(cwd).is_dir():
+        raise ValueError("Working directory must be an existing absolute directory")
+    return context, execution_env, cwd
+
+
+DESKTOP_ENVIRONMENT = {"DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XAUTHORITY"}
+
+
+def validate_environment(environment, peer_uid):
+    """Desktop session variables, accepted only when they point at the account's own runtime files."""
+    if not isinstance(environment, dict) or set(environment) - DESKTOP_ENVIRONMENT:
         raise ValueError("Unsupported execution environment")
     runtime = f"/run/user/{peer_uid}"
     for name, value in environment.items():
@@ -172,14 +189,7 @@ def validate_start(event, peer_uid, account):
         info = Path(runtime).lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != peer_uid or info.st_mode & 0o022:
             raise ValueError("Unsafe desktop runtime directory")
-    # Environment that can change executable/library/config lookup is never inherited.
-    execution_env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root", "USER": "root", "LOGNAME": "root",
-                     "LANG": "C.UTF-8", "KDESU_USER": account.pw_name}
-    execution_env.update(environment)
-    cwd = plain(event["cwd"], 4096, "working directory")
-    if not cwd.startswith("/") or not Path(cwd).is_dir():
-        raise ValueError("Working directory must be an existing absolute directory")
-    return context, execution_env, cwd
+    return dict(environment)
 
 
 async def read_event(reader, deadline):
@@ -362,7 +372,7 @@ class PhoneAttempt:
         if filename != "receipt.json":
             await asyncio.to_thread(self.phone.notify, self.request_id, canceled)
 
-    async def run(self, desktop_id, context, execution, environment, deadline):
+    async def run(self, desktop_id, context, execution, environment, deadline, operation="Run this command as root"):
         owner = self.authority
         try:
             audit(f"phone-attempt desktop={desktop_id} phone={self.phone_key_id}")
@@ -375,9 +385,11 @@ class PhoneAttempt:
             self.payload = dict(domain=crypto.DOMAIN, kind="authenticate", request_id=self.request_id,
                 nonce=crypto.b64(secrets.token_bytes(32)), machine_id=owner.machine_id, phone_key_id=self.phone_key_id,
                 certificate_sha256=crypto.digest(leaf_der), machine_name=socket.gethostname(),
-                operation="Run this command as root", issued_at_ms=now,
+                operation=operation, issued_at_ms=now,
                 expires_at_ms=now + int((deadline - time.monotonic()) * 1000),
-                context=context, execution=execution)
+                context=context)
+            if execution is not None:
+                self.payload["execution"] = execution
             if self.kde_messages and hasattr(self.phone, "transport"):
                 self.payload["transport"] = self.phone.transport
             if self.remote is not None:
@@ -476,6 +488,66 @@ class Authority:
         # The protected cross-process lock permits clearing only abandoned rows.
         self.db.execute("UPDATE requests SET status='canceled' WHERE status IN ('pending','ready')")
         self.db.commit()
+
+    async def approve_only(self, context, environment, deadline, operation, label):
+        """Phone approval without execution, for an opt-in PAM caller (sudo) that runs the command itself.
+
+        Same per-phone signed requests, first-approval-wins, revocation re-check and signed receipt as
+        handle(); the receipt carries no execution PID because nothing is launched here.
+        """
+        desktop_id = str(uuid.uuid4())
+        winner = None
+        approved = False
+        try:
+            pending = {}
+            for attempt in self.attempts:
+                attempt.task = asyncio.create_task(attempt.run(desktop_id, context, None, environment, deadline, operation))
+                pending[attempt.task] = attempt
+            while pending and winner is None:
+                done, _ = await asyncio.wait(set(pending), timeout=max(0.0, deadline - time.monotonic()),
+                                             return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    break
+                for task in done:
+                    attempt = pending.pop(task)
+                    try:
+                        signature = task.result()
+                    except Exception:
+                        attempt.withdraw()
+                        continue
+                    if signature is not None:
+                        winner = attempt
+                        break
+            if winner is None:
+                raise ConnectionError("No enrolled phone approved; devices may be offline or have declined")
+            for attempt in self.attempts:
+                if attempt is not winner:
+                    attempt.withdraw()
+            with commit_guard():
+                if crypto.digest(trusted_file(CONFIG, True)) != self.config_digest:
+                    raise ValueError("Phone approval was revoked or configuration changed")
+                with self.db:
+                    changed = self.db.execute("UPDATE requests SET status='consumed' WHERE id=? AND status='pending'",
+                                              (winner.request_id,)).rowcount
+                    if changed != 1:
+                        raise ValueError("Phone approval was already consumed")
+                approved = True
+            audit(f"{label}-approved request={winner.request_id} desktop={desktop_id} phone={winner.phone_key_id}")
+            signature = winner.task.result()
+            receipt = crypto.envelope(self.key, dict(domain=crypto.DOMAIN, kind="receipt", request_id=winner.request_id,
+                machine_id=self.machine_id, phone_key_id=winner.phone_key_id, response_sha256=crypto.digest(signature),
+                status="approved", verified_at_ms=int(time.time() * 1000)))
+            try:
+                await winner.deliver("receipt.json", receipt)
+            except Exception as error:
+                audit(f"{label}-receipt-delivery-failed request={winner.request_id}: {type(error).__name__}")
+            return winner
+        except (Exception, asyncio.CancelledError) as error:
+            audit(f"{label}-ended desktop={desktop_id} approved={approved} reason={type(error).__name__}: {error}")
+            raise
+        finally:
+            await asyncio.gather(*(attempt.finish(True) if attempt is winner and approved else attempt.withdraw()
+                                   for attempt in self.attempts), return_exceptions=True)
 
     async def handle(self, reader, writer, uid, first_event=None):
         desktop_id = None

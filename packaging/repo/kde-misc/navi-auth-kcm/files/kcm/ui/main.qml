@@ -83,6 +83,50 @@ KCM.ScrollViewKCM {
             type: Kirigami.MessageType.Information
             text: i18n("Administrator prompt status is unavailable: %1", kcm.authorityProblem)
         }
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: kcm.sudoApproval === "misplaced" || kcm.sudoApproval === "outdated" || kcm.sudoApprovalLost
+            type: Kirigami.MessageType.Warning
+            text: kcm.sudoApprovalLost
+                ? i18n("Phone approval for sudo was turned off outside System Settings, probably by a sudo update that replaced /etc/pam.d/sudo. Turn it on again to restore it.")
+                : i18n("The phone approval line in /etc/pam.d/sudo needs repair (it is below the password rule or not the expected line), so sudo may ask for the password first.")
+            actions: Kirigami.Action {
+                text: i18nc("@action:button", "Repair")
+                icon.name: "tools-wizard"
+                enabled: !kcm.busy && kcm.canChangeSudoApproval
+                onTriggered: kcm.setSudoApproval(true)
+            }
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            // Present only when navi-auth was built with sudo approval (USE=sudo / ENABLE_SUDO=yes).
+            visible: kcm.sudoApproval.length > 0
+            spacing: Kirigami.Units.smallSpacing
+            QQC2.Switch {
+                id: sudoSwitch
+                text: i18nc("@option:check", "Approve sudo from the phone in local Konsole and Kitty terminals")
+                checked: kcm.sudoApproval === "enabled"
+                enabled: !kcm.busy && kcm.canChangeSudoApproval && kcm.sudoApproval !== "unrecognized"
+                         && (checked || kcm.authorityConfigured)
+                onToggled: {
+                    const wanted = checked
+                    checked = Qt.binding(() => kcm.sudoApproval === "enabled") // reflect the real file, not the click
+                    kcm.setSudoApproval(wanted)
+                }
+                QQC2.ToolTip.text: !kcm.authorityConfigured && !checked
+                    ? i18n("Turn on Administrator prompts for a phone first; sudo uses the same protected phone approval.")
+                    : i18n("Adds one line to /etc/pam.d/sudo (administrator password required). sudo then asks the phone first; declining, a timeout or Ctrl-C falls back to your password. SSH sessions, other terminals, su, pkexec and other system prompts are not affected.")
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+            }
+            QQC2.BusyIndicator {
+                visible: kcm.busy && (kcm.task === "sudo-enable" || kcm.task === "sudo-disable")
+                running: visible
+                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                Layout.preferredWidth: Layout.preferredHeight
+            }
+            Item { Layout.fillWidth: true }
+        }
         QQC2.Label {
             Layout.fillWidth: true
             visible: kcm.initialized
