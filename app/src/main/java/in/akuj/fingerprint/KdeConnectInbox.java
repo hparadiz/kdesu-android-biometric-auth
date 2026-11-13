@@ -222,6 +222,35 @@ final class KdeConnectInbox {
             context.getSharedPreferences("kdeconnect", 0).edit().putBoolean("received", true).apply();
             return;
         }
+        deliver(context, mail, ROUTE_KDECONNECT, null);
+    }
+
+    static final String ROUTE_KDECONNECT = "kdeconnect", ROUTE_REMOTE = "remote", ROUTE_LAN = "lan";
+
+    /** The route a request arrived on; Navi answers the same way. */
+    static String route(Context context, Challenge request) {
+        try {
+            JSONObject recorded = new Bridge(context).read("request-route.json");
+            if (recorded != null && request.id.equals(recorded.optString("request_id"))) return recorded.getString("route");
+        } catch (Exception ignored) { }
+        return uses(request) ? ROUTE_KDECONNECT : ROUTE_LAN;
+    }
+
+    static void recordRoute(Bridge bridge, String id, String route) throws Exception {
+        bridge.write("request-route.json", new JSONObject().put("request_id", id).put("route", route));
+    }
+
+    /**
+     * A verified-format mailbox message from KDE Connect, or one decrypted from ntfy ({@code route} remote,
+     * from the configured computer {@code remoteMachine}). The same validation applies to both.
+     */
+    static void deliver(Context context, JSONObject mail, String route, String remoteMachine) throws Exception {
+        String name = mail.getString("name");
+        String id = mail.getString("request_id");
+        if (!id.matches("[a-f0-9]{32}") || !Arrays.asList("request.json", "receipt.json", "cancel.json").contains(name))
+            throw new IllegalArgumentException("Invalid authentication message.");
+        boolean remote = ROUTE_REMOTE.equals(route);
+        Challenge accepted = null;
         synchronized (Bridge.MAILBOX) {
             Bridge bridge = new Bridge(context);
             SigningKey key = SigningKey.prepare();
@@ -229,7 +258,8 @@ final class KdeConnectInbox {
             boolean requestMessage = "request.json".equals(name);
             Challenge request = bridge.validate(requestMessage ? value : mail.getJSONObject("request"), key, !requestMessage);
             // Enrollment is only reachable here after Bridge.validate accepted a code-pinned computer.
-            if (!id.equals(request.id) || desktop(request) == null)
+            if (!id.equals(request.id) || (remote ? !RemoteChannel.bound(request) || !"authenticate".equals(request.kind)
+                    || !request.payload.getString("machine_id").equals(remoteMachine) : desktop(request) == null))
                 throw new IllegalArgumentException("Authentication does not match its delivery route.");
             JSONObject tombstones = bridge.read("kde-cancellations.json");
             if (tombstones == null) tombstones = new JSONObject();
@@ -278,10 +308,12 @@ final class KdeConnectInbox {
                     } catch (Challenge.Expired ignored) { }
                 }
                 bridge.write(name, value);
+                recordRoute(bridge, id, route);
                 bridge.write("kde-cancellations.json", tombstones);
-                context.getSharedPreferences("kdeconnect", 0).edit().putBoolean("received", true).apply();
+                if (!remote) context.getSharedPreferences("kdeconnect", 0).edit().putBoolean("received", true).apply();
                 // Receiving through KDE Connect must preserve the user's direct-LAN preference.
                 RequestReceiver.refreshNotification(context, id, false);
+                accepted = request;
             } else {
                 JSONObject current = bridge.read("request.json");
                 JSONObject response = bridge.read("response.json");
@@ -291,5 +323,7 @@ final class KdeConnectInbox {
                 bridge.write(name, value);
             }
         }
+        // Over ntfy the request carries only its icon's hash; fetch the PNG if Navi doesn't have it.
+        if (remote && accepted != null) RemoteChannel.requestIconIfMissing(context, accepted);
     }
 }

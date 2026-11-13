@@ -92,6 +92,14 @@ boundary preventing direct helper invocation.
   builds reject unknown computer keys and every enrollment without a matching
   code pin in the shared validator. This flow has not yet been verified on
   hardware (see [verification record](docs/VERIFICATION.md)).
+- **Remote approvals (ntfy):** optional. While KDE Connect sees the phone nothing
+  is sent to the relay. Otherwise messages pass through the configured ntfy server,
+  end-to-end encrypted with a key derived from a biometric-approved ECDH setup and
+  never transmitted; authenticity still rests on the machine and phone signatures.
+  The relay learns topic names, IP addresses, timing and sizes, and can delay or
+  drop messages (availability, not authorization). The optional ntfy access token
+  is sent to Navi inside the signed setup request over KDE Connect. See
+  [Remote approvals](docs/REMOTE.md).
 - **Biometric modality:** Android selects strength, not exclusively fingerprint.
   Locally observed hardware enforcement is not independently verified attestation.
 - **Availability:** the LAN service adds network-facing code. Frames, workers and

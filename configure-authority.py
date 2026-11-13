@@ -82,10 +82,20 @@ def main():
             raise SystemExit("The reviewed machine identity changed")
         with sqlite3.connect(f"file:{source / 'approvals.sqlite3'}?mode=ro", uri=True) as db:
             row = db.execute("SELECT certificate FROM approved WHERE key_id=?", (args.phone_key_id,)).fetchone()
+            remote = None
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remote'").fetchone():
+                remote = db.execute("SELECT server, token, phone_topic, computer_topic, key FROM remote WHERE key_id=?",
+                                    (args.phone_key_id,)).fetchone()
         if row is None:
             raise SystemExit("The reviewed phone approval is missing")
         entry = dict(enabled=True, transport=args.transport, phone_key_id=args.phone_key_id,
                      phone_certificate_b64=base64.b64encode(bytes(row[0])).decode("ascii"))
+        if remote is not None:
+            # Remote approvals (ntfy) set up by this account: used when KDE Connect can't see the phone.
+            entry["remote"] = dict(server=remote[0], phone_topic=remote[2], computer_topic=remote[3],
+                                   key_b64=base64.b64encode(bytes(remote[4])).decode("ascii"))
+            if remote[1]:
+                entry["remote"]["token"] = remote[1]
         if args.endpoint:
             entry["endpoint"] = args.endpoint
         if args.kdeconnect_device:

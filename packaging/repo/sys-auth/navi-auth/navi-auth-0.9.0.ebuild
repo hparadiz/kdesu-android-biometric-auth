@@ -30,7 +30,7 @@ src_compile() {
 
 src_install() {
     exeinto /usr/libexec/navi-auth
-    doexe "${FILESDIR}/rootauth.py" "${FILESDIR}/host.py" "${FILESDIR}/configure-authority.py" "${FILESDIR}/kdeconnect_transport.py"
+    doexe "${FILESDIR}/rootauth.py" "${FILESDIR}/host.py" "${FILESDIR}/configure-authority.py" "${FILESDIR}/kdeconnect_transport.py" "${FILESDIR}/ntfy_transport.py"
     doexe authorize
     # polkit entry point for "Administrator prompts" in System Settings.
     newexe "${FILESDIR}/navi-auth-configure" configure

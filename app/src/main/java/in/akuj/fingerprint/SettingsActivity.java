@@ -63,6 +63,7 @@ public final class SettingsActivity extends Activity {
                     finish();
                 }).show());
         findViewById(R.id.settings_done).setOnClickListener(v -> finish());
+        showRemoteComputers();
         // MainActivity has already created the key; prepare() only opens it here.
         worker.execute(() -> {
             try {
@@ -92,7 +93,43 @@ public final class SettingsActivity extends Activity {
         toggle.setText(NetworkService.enabled(this) ? "Turn off network authentication" : "Enable network authentication");
         toggle.setEnabled(key != null && !busy);
         findViewById(R.id.background_setup).setEnabled(!busy);
+        boolean remote = RemoteChannel.configured(this);
+        ((TextView) findViewById(R.id.remote_status)).setText(!remote ? "Off · set up from the computer"
+                : NetworkService.remoteStatus.isEmpty() ? "On · background connection not running" : NetworkService.remoteStatus);
         findViewById(R.id.reset).setEnabled(!busy);
+    }
+
+    /** One row per computer that may reach this phone over ntfy, each with Turn off. */
+    private void showRemoteComputers() {
+        android.widget.LinearLayout list = findViewById(R.id.remote_list);
+        list.removeAllViews();
+        java.util.List<RemoteChannel.Config> configs;
+        try { configs = RemoteChannel.configs(this); }
+        catch (Exception error) { Log.w(TAG, "Remote approvals unavailable", error); return; }
+        for (RemoteChannel.Config config : configs) {
+            TextView label = new TextView(this);
+            label.setText(config.machineName + " · " + config.host());
+            label.setTextColor(getColor(R.color.navi_text));
+            label.setTextSize(16);
+            label.setPadding(0, 24, 0, 0);
+            list.addView(label);
+            Button off = new Button(this, null, 0, R.style.SetupButton);
+            off.setText("Turn off for " + config.machineName);
+            off.setOnClickListener(v -> new AlertDialog.Builder(this)
+                    .setTitle("Turn off remote approvals?")
+                    .setMessage(config.machineName + " will no longer reach this phone over ntfy. Approvals over KDE Connect "
+                            + "keep working. Also turn it off on the computer (Remote Approvals → Turn Off).")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Turn off", (dialog, which) -> {
+                        try {
+                            RemoteChannel.remove(this, config.machineId);
+                            NetworkService.restart(this);
+                        } catch (Exception error) { report(error); }
+                        showRemoteComputers();
+                        updateStatus();
+                    }).show());
+            list.addView(off);
+        }
     }
 
     private BiometricPrompt.Builder biometricPrompt() {
@@ -113,7 +150,7 @@ public final class SettingsActivity extends Activity {
         if (busy || key == null || stopped) return;
         if (NetworkService.enabled(this)) {
             getSharedPreferences("network", 0).edit().putBoolean("enabled", false).apply();
-            stopService(new Intent(this, NetworkService.class));
+            NetworkService.restart(this); // Remote approvals, if set up, keep running.
             updateStatus();
             return;
         }

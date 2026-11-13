@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 cmake_minimum_required(VERSION 3.22)
-project(navi-auth-kcm VERSION 0.8.1 LANGUAGES CXX)
+project(navi-auth-kcm VERSION 0.9.0 LANGUAGES CXX)
 
 set(QT_MIN_VERSION "6.6.0")
 set(KF_MIN_VERSION "6.0.0")

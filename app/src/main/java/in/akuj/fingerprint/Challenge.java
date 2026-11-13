@@ -36,6 +36,8 @@ final class Challenge {
         validateText(context.getString("target_user"), 64, false);
         validateText(context.getString("source"), 64, false);
         validateText(context.optString("icon_name"), 128, true);
+        if (!context.optString("icon_sha256").isEmpty() && !context.getString("icon_sha256").matches("[0-9a-f]{64}"))
+            throw new IllegalArgumentException("Invalid requester icon hash.");
         if (context.getLong("requesting_uid") < 0) throw new IllegalArgumentException("Invalid requesting account.");
         validateText(operation, 160, false);
         validateText(machineName, 128, false);
@@ -55,11 +57,24 @@ final class Challenge {
         long issued = payload.getLong("issued_at_ms");
         long expires = payload.getLong("expires_at_ms");
         if (!DOMAIN.equals(payload.getString("domain")) || !id.matches("[a-f0-9]{32}")
-                || (!kind.equals("enroll") && !kind.equals("authenticate"))
+                || (!kind.equals("enroll") && !kind.equals("authenticate") && !kind.equals("remote-setup"))
                 || operation.length() > 160 || operation.matches("(?s).*[\\x00-\\x1f].*")
                 || machineName.length() > 128 || Bridge.decode(payload.getString("nonce")).length != 32
                 || issued > now + 30_000 || expires <= issued || expires - issued > 120_000) {
             throw new IllegalArgumentException("Invalid or expired computer request. Start a new request on the computer.");
+        }
+        if (kind.equals("remote-setup")) {
+            // Remote approvals: an https ntfy server, an optional access token and the computer's ECDH key.
+            JSONObject setup = payload.getJSONObject("remote_setup");
+            RemoteChannel.validateServer(setup.getString("server"));
+            if (setup.has("token") && !RemoteChannel.TOKEN.matcher(setup.getString("token")).matches())
+                throw new IllegalArgumentException("Invalid ntfy access token.");
+            java.security.PublicKey ecdh = java.security.KeyFactory.getInstance("EC").generatePublic(
+                    new java.security.spec.X509EncodedKeySpec(Bridge.decode(setup.getString("machine_ecdh_spki_b64"))));
+            if (!(ecdh instanceof java.security.interfaces.ECPublicKey)
+                    || ((java.security.interfaces.ECPublicKey) ecdh).getParams().getCurve().getField().getFieldSize() != 256)
+                throw new IllegalArgumentException("Invalid remote setup key.");
+            if (execution()) throw new IllegalArgumentException("Remote setup cannot run a command.");
         }
         if (expires <= now && !allowExpired) throw new Expired();
         deadline = SystemClock.elapsedRealtime() + Math.min(expires - now, 120_000);
@@ -68,6 +83,7 @@ final class Challenge {
     boolean expired() { return SystemClock.elapsedRealtime() >= deadline; }
     boolean notificationOnly() { return "notification-only".equals(context.optString("mode")); }
     boolean execution() { return "execute".equals(context.optString("mode")); }
+    boolean remoteSetup() { return "remote-setup".equals(kind); }
 
     private static void validateText(String value, int limit, boolean allowEmpty) {
         if ((!allowEmpty && value.isEmpty()) || value.length() > limit) throw new IllegalArgumentException("Invalid request display metadata.");

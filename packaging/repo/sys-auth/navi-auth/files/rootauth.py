@@ -31,6 +31,7 @@ STATE = Path("/var/lib/navi-auth")
 RUNTIME = Path("/run/navi-auth")
 CONFIG = Path("/etc/navi-auth/config.json")
 MAX_MESSAGE = 65536
+MAX_IMPLEMENTATION = 1048576  # Installed program files; configuration stays limited to MAX_MESSAGE.
 
 
 def audit(message):
@@ -40,6 +41,14 @@ def audit(message):
         data = (time.strftime("%Y-%m-%dT%H:%M:%S%z") + " " + message + "\n").encode("utf-8", errors="replace")
         os.write(2, data[:2048])
     except OSError:
+        pass
+    # kdesu discards the helper's stderr, so also record decisions in the system log
+    # (journalctl -t navi-auth). Messages carry IDs and routes, never commands or keys.
+    try:
+        import syslog
+        syslog.openlog("navi-auth", syslog.LOG_PID, syslog.LOG_AUTHPRIV)
+        syslog.syslog(syslog.LOG_INFO, message[:1024])
+    except Exception:
         pass
 
 
@@ -52,13 +61,27 @@ def unique_object(pairs):
     return value
 
 
-def trusted_file(path, private=False):
+def trusted_file(path, private=False, limit=MAX_MESSAGE):
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & (0o077 if private else 0o022):
         raise ValueError(f"Unsafe ownership or permissions: {path}")
-    if info.st_size > MAX_MESSAGE:
-        raise ValueError(f"Oversized configuration: {path}")
+    if info.st_size > limit:
+        raise ValueError(f"Oversized {'configuration' if limit == MAX_MESSAGE else 'file'}: {path}")
     return path.read_bytes()
+
+
+IMPLEMENTATION = ("rootauth.py", "host.py", "kdeconnect_transport.py", "ntfy_transport.py")
+
+
+def check_implementation(directory=None):
+    """The installed program files must be root-owned and not writable by others."""
+    directory = directory or Path(__file__).resolve().parent
+    for name in IMPLEMENTATION:
+        source = directory / name
+        trusted_file(source, limit=MAX_IMPLEMENTATION)
+        info = source.parent.stat()
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError("Authority implementation directory is not protected")
 
 
 def private_directory(path, mode):
@@ -234,7 +257,7 @@ def authority_status(uid, event):
                 pass
             phones.append(dict(phone_key_id=entry["phone_key_id"], enabled=entry.get("enabled", True),
                                transport=entry.get("transport"), kdeconnect_device=entry.get("kdeconnect_device"),
-                               certificate_expires=expires))
+                               remote=(entry.get("remote") or {}).get("server"), certificate_expires=expires))
     return dict(configured=True, valid=True, account_matches=matches,
                 enabled=bool(config.get("enabled", True)) if matches else None,
                 machine_key_id=config.get("machine_key_id") if matches else None, phones=phones)
@@ -257,6 +280,11 @@ def phone_entries(config):
         seen.add(entry["phone_key_id"])
         if type(entry.get("enabled", True)) is not bool:
             raise ValueError("Invalid phone enablement")
+        if entry.get("remote") is not None:
+            remote = entry["remote"]
+            if not isinstance(remote, dict) or set(remote) - {"server", "token", "phone_topic", "computer_topic", "key_b64"}:
+                raise ValueError("Invalid remote approval entry")
+            crypto.remote_module().validate_config(dict(remote, key=remote.get("key_b64")))
     return entries
 
 
@@ -283,6 +311,10 @@ class PhoneAttempt:
         if not self.kde_messages and config.get("endpoint") is not None:
             crypto.NetworkPhone(plain(config["endpoint"], 128, "Phone LAN endpoint"),
                                 authority.key, authority.root, self.leaf)
+        # Remote approvals (ntfy): used only when KDE Connect cannot see the phone.
+        self.remote = None
+        if config.get("remote") is not None:
+            self.remote = crypto.remote_module().validate_config(dict(config["remote"], key=config["remote"].get("key_b64")))
         self.phone = None
         self.request_id = None
         self.payload = None
@@ -296,14 +328,34 @@ class PhoneAttempt:
 
     def connect(self, environment):
         owner = self.authority
+
+        def make_primary():
+            if self.kde_messages:
+                return crypto.kdeconnect_transport()(crypto, self.kdeconnect_device,
+                    owner.key, owner.root, self.leaf, owner.account, environment)
+            resolver = None
+            if self.kdeconnect_device:
+                resolver = lambda **options: crypto.kdeconnect_endpoint(
+                    self.kdeconnect_device, environment, owner.account, **options)
+            return crypto.NetworkPhone(self.config.get("endpoint"), owner.key, owner.root, self.leaf, resolver)
+
+        if self.remote is None:
+            return make_primary()
+        module = crypto.remote_module()
+        probe = None
         if self.kde_messages:
-            return crypto.kdeconnect_transport()(crypto, self.kdeconnect_device,
-                owner.key, owner.root, self.leaf, owner.account, environment)
-        resolver = None
-        if self.kdeconnect_device:
-            resolver = lambda **options: crypto.kdeconnect_endpoint(
-                self.kdeconnect_device, environment, owner.account, **options)
-        return crypto.NetworkPhone(self.config.get("endpoint"), owner.key, owner.root, self.leaf, resolver)
+            # KDE Connect's "reachable" can be stale after Wi-Fi drops: confirm the phone answers.
+            probe = lambda: crypto.lan_present(crypto.kdeconnect_addresses(self.kdeconnect_device, environment, owner.account))
+        routed = module.RoutedPhone(
+            make_primary,
+            lambda: module.RemotePhone(crypto, self.remote, owner.key, owner.root, self.leaf, owner.account),
+            log=lambda message: audit(f"phone-route phone={self.phone_key_id} {message}"), probe=probe)
+        try:
+            routed.check()
+        except BaseException:
+            routed.close()
+            raise
+        return routed
 
     async def deliver(self, filename, value, canceled=False):
         await asyncio.to_thread(self.phone.write, filename, value)
@@ -326,8 +378,15 @@ class PhoneAttempt:
                 operation="Run this command as root", issued_at_ms=now,
                 expires_at_ms=now + int((deadline - time.monotonic()) * 1000),
                 context=context, execution=execution)
-            if self.kde_messages:
+            if self.kde_messages and hasattr(self.phone, "transport"):
                 self.payload["transport"] = self.phone.transport
+            if self.remote is not None:
+                self.payload["remote"] = {"kind": "ntfy"}
+                if self.phone.route == "remote" and context.get("icon_png_base64"):
+                    # Over ntfy only the signed icon hash travels; Navi asks for the PNG if it lacks it.
+                    png = base64.b64decode(context["icon_png_base64"], validate=True)
+                    self.payload["context"] = dict(context, icon_png_base64="", icon_sha256=crypto.digest(png))
+                    self.phone.set_icon(png)
             self.request = crypto.envelope(owner.key, self.payload)
             self.request.update(machine_certificate_b64=crypto.b64(owner.root.public_bytes(crypto.serialization.Encoding.DER)),
                                 phone_certificate_b64=crypto.b64(leaf_der))
@@ -337,7 +396,8 @@ class PhoneAttempt:
             self.delivery_started = True
             await self.deliver("request.json", self.request)
             self.delivered = True
-            audit(f"requested request={self.request_id} desktop={desktop_id} phone={self.phone_key_id}")
+            route = "ntfy" if getattr(self.phone, "route", None) == "remote" else "kdeconnect" if self.kde_messages else "lan"
+            audit(f"requested request={self.request_id} desktop={desktop_id} phone={self.phone_key_id} route={route}")
             while not self.stopping.is_set() and time.monotonic() < deadline:
                 value = await asyncio.to_thread(self.phone.read, "response.json")
                 if self.stopping.is_set():
@@ -386,7 +446,7 @@ class PhoneAttempt:
                     await self.deliver("cancel.json", cancel, True)
                 except Exception as error:
                     audit(f"phone-cancel-delivery-failed request={self.request_id}: {type(error).__name__}")
-        if self.kde_messages and self.phone is not None:
+        if self.phone is not None and hasattr(self.phone, "close"):
             await asyncio.to_thread(self.phone.close)
 
 
@@ -625,12 +685,7 @@ def main():
     if os.geteuid() != 0:
         raise ValueError("The installed authority must run as root")
     os.umask(0o077)
-    for source in (Path(__file__).resolve(), Path(__file__).resolve().with_name("host.py"),
-                   Path(__file__).resolve().with_name("kdeconnect_transport.py")):
-        trusted_file(source)
-        info = source.parent.stat()
-        if info.st_uid != 0 or info.st_mode & 0o022:
-            raise ValueError("Authority implementation directory is not protected")
+    check_implementation()
     private_directory(STATE, 0o700)
     private_directory(RUNTIME, 0o755)
     if sys.argv[1:] == ["--check"]:

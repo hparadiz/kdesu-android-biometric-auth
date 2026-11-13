@@ -121,6 +121,10 @@ KCM.ScrollViewKCM {
             required property string phoneKeyId
             required property var certificateExpiry
             required property string adminState
+            required property string remote
+            required property string remotePhoneUrl
+            required property string remoteComputerUrl
+            readonly property string remoteHost: remote.replace(/^https?:\/\//, "").replace(/\/$/, "")
 
             width: ListView.view.width
             down: false
@@ -173,6 +177,14 @@ KCM.ScrollViewKCM {
                             opacity: 0.8
                             font: Kirigami.Theme.smallFont
                         }
+                    }
+                    QQC2.Label {
+                        Layout.fillWidth: true
+                        visible: card.enrolled && card.remote.length > 0
+                        text: i18n("Remote approvals over %1 when KDE Connect can't see the phone", card.remoteHost)
+                        elide: Text.ElideRight
+                        opacity: 0.7
+                        font: Kirigami.Theme.smallFont
                     }
                     RowLayout {
                         visible: card.enrolled && kcm.authorityAvailable && kcm.authorityProblem.length === 0
@@ -227,9 +239,10 @@ KCM.ScrollViewKCM {
                     visible: card.enrolled
                     text: i18nc("@action:button", "Send Test")
                     icon.name: "fingerprint"
-                    enabled: !kcm.busy && card.usable
+                    // With remote approvals a phone KDE Connect can't see is still reachable over ntfy.
+                    enabled: !kcm.busy && (card.usable || card.remote.length > 0)
                     onClicked: testMenu.popup(this, 0, height)
-                    QQC2.ToolTip.text: i18n("Ask the phone for a fingerprint approval without running anything. Choose how the request travels: as signed files through KDE Connect, or over Navi's direct network connection (needs Enable network authentication in Navi → ☰ → Settings).")
+                    QQC2.ToolTip.text: i18n("Ask the phone for a fingerprint approval without running anything. Choose how the request travels: as signed files through KDE Connect (or over ntfy when remote approvals are on and KDE Connect can't see the phone), over Navi's direct network connection (needs Enable network authentication in Navi → ☰ → Settings), or over ntfy only.")
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                     QQC2.Menu {
@@ -243,6 +256,13 @@ KCM.ScrollViewKCM {
                             text: i18nc("@action:inmenu", "Over the network (direct)")
                             icon.name: "network-wireless"
                             onTriggered: kcm.sendTest(card.deviceId, "network")
+                        }
+                        QQC2.MenuItem {
+                            visible: card.remote.length > 0
+                            height: visible ? implicitHeight : 0
+                            text: i18nc("@action:inmenu", "Over ntfy (remote)")
+                            icon.name: "cloud-upload"
+                            onTriggered: kcm.sendTest(card.deviceId, "remote")
                         }
                     }
                 }
@@ -265,6 +285,33 @@ KCM.ScrollViewKCM {
                     onClicked: menu.popup()
                     QQC2.Menu {
                         id: menu
+                        QQC2.MenuItem {
+                            text: i18nc("@action:inmenu", "Remote Approvals…")
+                            icon.name: "cloud-upload"
+                            onTriggered: {
+                                remoteDialog.deviceId = card.deviceId
+                                remoteDialog.deviceName = card.name
+                                remoteDialog.remote = card.remote
+                                remoteDialog.adminEnabled = card.adminEnabled
+                                remoteDialog.phoneUrl = card.remotePhoneUrl
+                                remoteDialog.computerUrl = card.remoteComputerUrl
+                                remoteDialog.open()
+                            }
+                        }
+                        QQC2.MenuItem {
+                            visible: card.remotePhoneUrl.length > 0
+                            height: visible ? implicitHeight : 0
+                            text: i18nc("@action:inmenu", "Open Phone Inbox on ntfy")
+                            icon.name: "internet-services"
+                            onTriggered: Qt.openUrlExternally(card.remotePhoneUrl)
+                        }
+                        QQC2.MenuItem {
+                            visible: card.remoteComputerUrl.length > 0
+                            height: visible ? implicitHeight : 0
+                            text: i18nc("@action:inmenu", "Open Computer Inbox on ntfy")
+                            icon.name: "internet-services"
+                            onTriggered: Qt.openUrlExternally(card.remoteComputerUrl)
+                        }
                         QQC2.MenuItem {
                             text: i18nc("@action:inmenu", "Show Administrator Command…")
                             icon.name: "utilities-terminal"
@@ -291,6 +338,10 @@ KCM.ScrollViewKCM {
 
     EnrollDialog {
         id: enrollDialog
+    }
+
+    RemoteDialog {
+        id: remoteDialog
     }
 
     Kirigami.PromptDialog {

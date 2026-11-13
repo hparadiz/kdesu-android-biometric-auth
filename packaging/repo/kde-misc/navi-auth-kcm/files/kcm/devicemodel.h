@@ -25,6 +25,9 @@ public:
         CertificateExpiryRole,
         EnrolledAtRole,
         AdminStateRole,
+        RemoteRole,
+        RemotePhoneUrlRole,
+        RemoteComputerUrlRole,
     };
     Q_ENUM(Roles)
 
@@ -40,6 +43,11 @@ public:
         QDateTime enrolledAt;
         /** none | enabled | revoked | other-device, from the protected root authority. */
         QString adminState = QStringLiteral("none");
+        /** ntfy server URL when remote approvals are set up for this phone, else empty. */
+        QString remote;
+        /** Web addresses of the phone's and the computer's ntfy inbox topics (encrypted traffic). */
+        QString remotePhoneUrl;
+        QString remoteComputerUrl;
     };
 
     using QAbstractListModel::QAbstractListModel;

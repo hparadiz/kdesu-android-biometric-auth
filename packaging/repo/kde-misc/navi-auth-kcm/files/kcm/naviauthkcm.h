@@ -76,9 +76,12 @@ public:
     Q_INVOKABLE void refresh();
     Q_INVOKABLE void initialize();
     Q_INVOKABLE void startEnrollment(const QString &deviceId);
-    /** transport: "kdeconnect" (signed files through KDE Connect) or "network" (direct TLS connection). */
+    /** transport: "kdeconnect" (signed files through KDE Connect), "network" (direct TLS connection) or "remote" (ntfy). */
     Q_INVOKABLE void sendTest(const QString &deviceId, const QString &transport = QStringLiteral("kdeconnect"));
     Q_INVOKABLE void revoke(const QString &deviceId);
+    /** Remote approvals over ntfy: the phone approves the setup with a fingerprint. */
+    Q_INVOKABLE void setupRemote(const QString &deviceId, const QString &server, const QString &token);
+    Q_INVOKABLE void removeRemote(const QString &deviceId);
     /** Asks for the administrator password (polkit) and adds the phone to the protected authority. */
     Q_INVOKABLE void enableAdministratorPrompts(const QString &deviceId);
     /** Disables the phone for administrator prompts; the helper allows this without a password. */
@@ -128,6 +131,8 @@ private:
     QJsonObject m_authority;
     QString m_revokeAfterAuthority; // device whose local enrollment is removed once root revocation succeeds
     bool m_authorityRevoked = false;
-    bool m_testOverNetwork = false;
+    QString m_testTransport;
+    QString m_route;            // "route" step of the running task: kdeconnect | network | ntfy
+    QString m_updateAdminAfter; // device whose administrator-prompt entry is refreshed after a remote change
     bool m_refreshPending = false;
 };

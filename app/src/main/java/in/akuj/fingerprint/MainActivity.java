@@ -56,13 +56,14 @@ public final class MainActivity extends Activity {
     private Challenge pending, awaiting;
     private JSONObject signedResponse;
     private Attempt active;
-    private String seenEnvelope, proofText, openedRequestId;
+    private String seenEnvelope, proofText, openedRequestId, iconPending;
     private boolean stopped = true, resumed, busy, ready;
     private final Runnable timeout = () -> cancel("Challenge expired", "Start a fresh request on the computer.");
     private final Runnable poll = new Runnable() {
         @Override public void run() {
             if (stopped) return;
             if (key != null && !busy) pollComputer();
+            showArrivedIcon();
             scanDownloads();
             updatePairing();
             offerBackgroundSetup();
@@ -74,6 +75,7 @@ public final class MainActivity extends Activity {
         final Challenge request;
         final CancellationSignal cancellation = new CancellationSignal();
         Signature signature;
+        java.security.KeyPair ecdh; // Remote setup only: this phone's fresh key-agreement key.
         Attempt(Challenge request) { this.request = request; }
     }
 
@@ -106,7 +108,7 @@ public final class MainActivity extends Activity {
         });
         authenticate.setOnClickListener(v -> {
             if (key == null) loadKey();
-            else if (KdeConnectInbox.uses(awaiting)) sendKdeApproval();
+            else if (resendable(awaiting)) deliverApproval(awaiting, true);
             else begin();
         });
         enroll.setOnClickListener(v -> {
@@ -149,7 +151,7 @@ public final class MainActivity extends Activity {
     @Override protected void onStart() {
         super.onStart();
         stopped = false;
-        if (NetworkService.enabled(this)) startNetwork();
+        if (NetworkService.shouldRun(this)) startNetwork();
         refresh();
         if (key == null && ready && !busy) loadKey();
         handler.removeCallbacks(poll);
@@ -237,9 +239,10 @@ public final class MainActivity extends Activity {
         int availability = biometricAvailability();
         ready = availability == BiometricManager.BIOMETRIC_SUCCESS;
         authenticate.setEnabled(ready && !busy && active == null && (key == null || pending != null
-                || KdeConnectInbox.uses(awaiting) && !awaiting.expired()));
-        authenticate.setText(key == null ? "Prepare phone" : KdeConnectInbox.uses(awaiting) ? "Send approval again" : pending != null && pending.kind.equals("enroll")
-                ? "Approve enrollment" : "Approve request");
+                || resendable(awaiting) && !awaiting.expired()));
+        authenticate.setText(key == null ? "Prepare phone" : resendable(awaiting) ? "Send approval again"
+                : pending != null && pending.kind.equals("enroll") ? "Approve enrollment"
+                : pending != null && pending.remoteSetup() ? "Allow remote approvals" : "Approve request");
         enroll.setVisibility(availability == BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED ? View.VISIBLE : View.GONE);
         if (pairingConfirm != null) pairingConfirm.setEnabled(key != null && ready && !busy && !pairingBusy && active == null);
         if (!ready) setStatus("Biometrics unavailable", availability == BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED
@@ -303,10 +306,13 @@ public final class MainActivity extends Activity {
                     return;
                 }
                 // All displayed authorization context comes from the verified payload.
-                Bitmap icon = RequesterIcon.decode(request.context);
+                Bitmap icon = RequesterIcon.decode(this, request.context);
                 ImageView requester = findViewById(R.id.requester_icon);
                 if (icon == null) requester.setImageResource(R.drawable.ic_requester);
                 else requester.setImageBitmap(icon);
+                // Over ntfy only the icon's hash arrives; the computer sends the PNG when Navi asks.
+                iconPending = icon == null && !request.context.optString("icon_sha256").isEmpty()
+                        ? request.context.getString("icon_sha256") : null;
                 requester.setContentDescription(request.context.getString("application") + " icon");
                 showMachine(request.machineName, request.payload.getString("machine_id"),
                         request.kind.equals("enroll") ? "New pairing" : "Paired computer");
@@ -336,8 +342,11 @@ public final class MainActivity extends Activity {
                     } else setStatus("Approval stopped", "Start a new request on the computer.");
                 } else {
                     pending = request;
-                    setStatus(request.kind.equals("enroll") ? "Pair this computer" : "Authentication requested",
-                            request.operation);
+                    setStatus(request.kind.equals("enroll") ? "Pair this computer"
+                            : request.remoteSetup() ? "Allow remote approvals" : "Authentication requested",
+                            request.remoteSetup() ? request.operation + ". When KDE Connect can't reach this phone (for "
+                                    + "example on mobile data), " + request.machineName + " sends encrypted requests through "
+                                    + "this server instead. Navi keeps a background connection to it." : request.operation);
                 }
                 refresh();
             }
@@ -357,11 +366,15 @@ public final class MainActivity extends Activity {
                             .put("computer_receipt", bridge.read("receipt.json")).toString(2);
                     proof.setVisibility(View.VISIBLE);
                     boolean enrolled = awaiting.kind.equals("enroll");
+                    boolean remoteEnabled = awaiting.remoteSetup();
                     dismissNotification(awaiting);
                     showPairedComputers(bridge.pairings());
                     showMachine(awaiting.machineName, awaiting.payload.getString("machine_id"), "Paired computer");
-                    setStatus(enrolled ? "Phone approved by computer" : awaiting.execution() ? "Authorized on " + awaiting.machineName : "Phone approval verified",
+                    setStatus(enrolled ? "Phone approved by computer" : remoteEnabled ? "Remote approvals on"
+                                    : awaiting.execution() ? "Authorized on " + awaiting.machineName : "Phone approval verified",
                             enrolled ? "The computer signed your public key and verified your biometric approval."
+                                    : remoteEnabled ? awaiting.machineName + " can now reach this phone over ntfy when KDE Connect "
+                                    + "can't. Turn this off in ☰ → Settings → Remote approvals."
                                     : awaiting.execution() ? "Your computer verified this phone’s signature and launched the command you approved."
                                     : awaiting.notificationOnly() ? "Your computer verified the phone’s signature. The desktop still requires its normal authentication."
                                     : "The computer verified your approved certificate and your fresh signed challenge.");
@@ -487,6 +500,12 @@ public final class MainActivity extends Activity {
         worker.execute(() -> {
             try {
                 Signature signature = key.beginSignature();
+                if (attempt.request.remoteSetup()) {
+                    // Software ECDH key: only its public half leaves the phone, signed with the fingerprint.
+                    java.security.KeyPairGenerator generator = java.security.KeyPairGenerator.getInstance("EC");
+                    generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+                    attempt.ecdh = generator.generateKeyPair();
+                }
                 runOnUiThread(() -> {
                     if (active != attempt || stopped) return;
                     attempt.signature = signature;
@@ -501,7 +520,8 @@ public final class MainActivity extends Activity {
         setStatus("Waiting for your fingerprint", attempt.request.operation);
         try {
             biometricPrompt()
-                    .setTitle(attempt.request.kind.equals("enroll") ? "Approve computer pairing" : "Approve authentication")
+                    .setTitle(attempt.request.kind.equals("enroll") ? "Approve computer pairing"
+                            : attempt.request.remoteSetup() ? "Allow remote approvals" : "Approve authentication")
                     .setSubtitle(attempt.request.context.optString("application") + " · " + attempt.request.machineName)
                     .setDescription((attempt.request.notificationOnly() ? "Verification preview. Desktop authentication is separate.\n" : "")
                             + attempt.request.operation + "\nAccount: " + attempt.request.context.optString("target_user")
@@ -535,11 +555,26 @@ public final class MainActivity extends Activity {
             }
             Signature authorized = result.getCryptoObject() == null ? null : result.getCryptoObject().getSignature();
             if (authorized == null || authorized != attempt.signature) throw new IllegalStateException("Signing operation was not authorized.");
-            authorized.update(attempt.request.bytes);
+            byte[] signedBytes = attempt.request.bytes;
+            byte[] ecdhPublic = null;
+            if (attempt.request.remoteSetup()) {
+                // Bind this phone's key-agreement key to the exact setup request with the fingerprint signature.
+                ecdhPublic = attempt.ecdh.getPublic().getEncoded();
+                signedBytes = new byte[attempt.request.bytes.length + 1 + ecdhPublic.length];
+                System.arraycopy(attempt.request.bytes, 0, signedBytes, 0, attempt.request.bytes.length);
+                signedBytes[attempt.request.bytes.length] = '\n';
+                System.arraycopy(ecdhPublic, 0, signedBytes, attempt.request.bytes.length + 1, ecdhPublic.length);
+            }
+            authorized.update(signedBytes);
             byte[] signed = authorized.sign();
             if (attempt.request.expired()) { timeout.run(); return; }
-            if (!key.verify(attempt.request.bytes, signed)) throw new IllegalStateException("Phone signature did not verify.");
+            if (!key.verify(signedBytes, signed)) throw new IllegalStateException("Phone signature did not verify.");
             signedResponse = bridge.signed(attempt.request, signed);
+            if (ecdhPublic != null) {
+                signedResponse.put("phone_ecdh_spki_b64", Bridge.encode(ecdhPublic));
+                bridge.write("response.json", signedResponse);
+                enableRemote(attempt);
+            }
             dismissNotification(attempt.request);
             awaiting = attempt.request;
             active = null;
@@ -547,23 +582,67 @@ public final class MainActivity extends Activity {
             handler.removeCallbacks(timeout);
             refresh();
             setStatus("Waiting for computer confirmation", "Your signed approval has been sent.");
-            if (KdeConnectInbox.uses(awaiting)) sendKdeApproval();
+            deliverApproval(awaiting, false);
         } catch (Exception error) { fail(attempt, error); }
     }
 
-    private void sendKdeApproval() {
-        if (!KdeConnectInbox.uses(awaiting)) return;
-        try { KdeConnectInbox.sendResponse(this, awaiting); }
-        catch (Exception error) { setStatus("Approval delivery failed", error.getMessage() + " Tap Send approval again to retry this same signed response."); }
+    /** Derives and stores the remote approval key and topics; the computer derives the same ones. */
+    private void enableRemote(Attempt attempt) throws Exception {
+        org.json.JSONObject setup = attempt.request.payload.getJSONObject("remote_setup");
+        java.security.PublicKey machine = java.security.KeyFactory.getInstance("EC").generatePublic(
+                new java.security.spec.X509EncodedKeySpec(Bridge.decode(setup.getString("machine_ecdh_spki_b64"))));
+        javax.crypto.KeyAgreement agreement = javax.crypto.KeyAgreement.getInstance("ECDH");
+        agreement.init(attempt.ecdh.getPrivate());
+        agreement.doPhase(machine, true);
+        RemoteChannel.save(this, attempt.request.payload.getString("machine_id"), attempt.request.machineName,
+                setup.getString("server"), setup.has("token") ? setup.getString("token") : null,
+                agreement.generateSecret(), attempt.request.id);
+        attempt.ecdh = null;
+        NetworkService.restart(this);
+    }
+
+    /** A signed reply can be re-sent: through KDE Connect, or over ntfy when the request allows it. */
+    private static boolean resendable(Challenge request) {
+        return KdeConnectInbox.uses(request) || RemoteChannel.bound(request);
+    }
+
+    /**
+     * Sends the stored response (approval or decline) the way the request arrived. {@code everywhere}
+     * ("Send approval again") also tries ntfy and KDE Connect, e.g. when Wi-Fi dropped after the request.
+     */
+    private void deliverApproval(Challenge request, boolean everywhere) {
+        if (request == null) return;
+        String route = KdeConnectInbox.route(this, request);
+        if (KdeConnectInbox.ROUTE_REMOTE.equals(route) || everywhere && RemoteChannel.bound(request)) {
+            worker.execute(() -> {
+                try { RemoteChannel.sendResponse(getApplicationContext(), request); }
+                catch (Exception error) {
+                    Log.w(TAG, "Remote reply failed", error);
+                    runOnUiThread(() -> { if (!isDestroyed() && awaiting == request) setStatus("Approval delivery failed",
+                            error.getMessage() + " Tap Send approval again to retry this same signed response."); });
+                }
+            });
+        }
+        if (KdeConnectInbox.ROUTE_KDECONNECT.equals(route) || everywhere && KdeConnectInbox.uses(request)) {
+            try { KdeConnectInbox.sendResponse(this, request); }
+            catch (Exception error) { setStatus("Approval delivery failed", error.getMessage() + " Tap Send approval again to retry this same signed response."); }
+        }
     }
 
     private void declineAttempt(Attempt attempt, String title, String message) {
         if (active != attempt) return;
         cancel(title, message);
-        if (!stopped && KdeConnectInbox.uses(attempt.request)) {
-            try { KdeConnectInbox.sendResponse(this, attempt.request); }
-            catch (Exception error) { Log.w(TAG, "Could not deliver phone decline", error); }
-        }
+        if (!stopped) deliverApproval(attempt.request, false);
+    }
+
+    /** Swaps in a requester icon that arrived over ntfy after the request was shown. */
+    private void showArrivedIcon() {
+        if (iconPending == null) return;
+        byte[] png = IconCache.get(this, iconPending);
+        if (png == null) return;
+        Bitmap bitmap = android.graphics.BitmapFactory.decodeByteArray(png, 0, png.length);
+        if (bitmap != null) ((ImageView) findViewById(R.id.requester_icon)).setImageBitmap(bitmap);
+        iconPending = null;
     }
 
     private void fail(Attempt attempt, Exception error) {
@@ -649,7 +728,8 @@ public final class MainActivity extends Activity {
         worker.execute(() -> {
             try {
                 SigningKey.reset();
-                bridge.reset();
+                bridge.reset(); // Also forgets remote approvals (remote.json).
+                IconCache.clear(getApplicationContext());
                 runOnUiThread(() -> { if (!isDestroyed()) { busy = false; loadKey(); } });
             } catch (Exception error) {
                 runOnUiThread(() -> { if (!isDestroyed()) { busy = false; refresh(); report(error); } });
@@ -673,7 +753,7 @@ public final class MainActivity extends Activity {
 
     private void offerBackgroundSetup() {
         if (stopped || !hasWindowFocus() || busy || active != null || pending != null || awaiting != null
-                || openedRequestId != null || !NetworkService.enabled(this)
+                || openedRequestId != null || !NetworkService.shouldRun(this)
                 || getSharedPreferences("background", 0).getBoolean("setup_offered_v1", false)) return;
         getSharedPreferences("background", 0).edit().putBoolean("setup_offered_v1", true).apply();
         new AlertDialog.Builder(this).setTitle("Keep Navi available in the background")

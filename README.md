@@ -27,9 +27,9 @@ part of the security boundary.
 
 | Component | Version / purpose |
 | --- | --- |
-| Android application | 0.9.2, API 28+, desk reader mode, code enrollment (KDE Connect, guided destination setup, Downloads on Android 9–10), Settings and Paired computers screens, non-debuggable release |
-| Host CLI and native/Python authority | 0.8.1 with code enrollment over KDE Connect, device selection by name, and a warning when kdesu is not Navi-enabled |
-| System Settings page | `kcm_navi_auth` 0.8.1: enroll, status and test (KDE Connect messages or direct network) per KDE Connect device |
+| Android application | 0.10.0, API 28+, desk reader mode, code enrollment (KDE Connect, guided destination setup, Downloads on Android 9–10), Settings and Paired computers screens, remote approvals over ntfy, non-debuggable release |
+| Host CLI and native/Python authority | 0.9.0 with code enrollment over KDE Connect, device selection by name, remote approvals over ntfy when KDE Connect can't see the phone, and a warning when kdesu is not Navi-enabled |
+| System Settings page | `kcm_navi_auth` 0.9.0: enroll, status, remote approvals and test (KDE Connect messages, direct network or ntfy) per KDE Connect device |
 | KDE patch and Gentoo packages | kdesu-gui 6.8.2-r1 against kde-cli-tools 6.8.2 (6.7.2-r3 for Plasma 6.7.2) |
 | Direct Wi-Fi transport | Pinned TLS 1.3; restricted TLS 1.2 on Android 9; TCP 39841 |
 | Optional KDE Connect transport | File sharing on Android 10+, or paired-device IP lookup for direct Wi-Fi |
@@ -44,6 +44,11 @@ Android 9 accepts Pixel and Nexus 6P devices. Other phone models are unverified.
 been verified on a physical phone.** The desktop baseline is
 Gentoo with the patched KDE versions above; see the full
 [prerequisites](docs/INSTALL.md#supported-baseline).
+
+When the phone is away from the computer's network (mobile data, other Wi-Fi),
+approvals can travel end-to-end encrypted through an ntfy server instead; see
+[Remote approvals](docs/REMOTE.md). **This route is new and has not yet been
+verified on a physical phone.**
 
 The new dedicated KDE Connect plugin was a separate unfinished experiment. It is
 not needed for this release and is not included as a working feature. Bluetooth

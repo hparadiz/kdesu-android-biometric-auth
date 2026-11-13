@@ -33,6 +33,16 @@
             <Button android:id="@+id/kdeconnect_setup" style="@style/SetupButton" android:text="Set up KDE Connect" />
         </LinearLayout>
 
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical" android:background="@drawable/panel" android:layout_marginTop="16dp">
+            <TextView style="@style/SetupHeading" android:textSize="20sp" android:text="Remote approvals" />
+            <TextView android:id="@+id/remote_status" style="@style/SetupStatus" android:text="Off" />
+            <TextView style="@style/SetupBody"
+                android:text="When KDE Connect can't reach this phone, for example on mobile data, a computer with remote approvals sends end-to-end encrypted requests through an ntfy server instead. Navi keeps one background connection to it. Set it up on the computer: System Settings → Navi Authenticator → ⋮ next to this phone → Remote Approvals." />
+            <LinearLayout android:id="@+id/remote_list" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </LinearLayout>
+
         <Space android:layout_width="match_parent" android:layout_height="24dp" android:layout_weight="1" />
         <Button android:id="@+id/reset" style="?android:attr/borderlessButtonStyle"
             android:layout_width="match_parent" android:layout_height="48dp" android:layout_marginTop="12dp"

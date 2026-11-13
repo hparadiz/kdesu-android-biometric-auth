@@ -36,6 +36,12 @@ QVariant DeviceModel::data(const QModelIndex &index, int role) const
         return device.enrolledAt;
     case AdminStateRole:
         return device.adminState;
+    case RemoteRole:
+        return device.remote;
+    case RemotePhoneUrlRole:
+        return device.remotePhoneUrl;
+    case RemoteComputerUrlRole:
+        return device.remoteComputerUrl;
     }
     return {};
 }
@@ -53,6 +59,9 @@ QHash<int, QByteArray> DeviceModel::roleNames() const
         {CertificateExpiryRole, "certificateExpiry"},
         {EnrolledAtRole, "enrolledAt"},
         {AdminStateRole, "adminState"},
+        {RemoteRole, "remote"},
+        {RemotePhoneUrlRole, "remotePhoneUrl"},
+        {RemoteComputerUrlRole, "remoteComputerUrl"},
     };
 }
 
@@ -84,6 +93,9 @@ void DeviceModel::update(const QJsonArray &devices, const QJsonArray &phones, co
         device.share = object.value(QStringLiteral("share")).toBool();
         device.enrolled = object.value(QStringLiteral("enrolled")).toBool();
         device.phoneKeyId = object.value(QStringLiteral("phone_key_id")).toString();
+        device.remote = object.value(QStringLiteral("remote")).toString();
+        device.remotePhoneUrl = object.value(QStringLiteral("remote_phone_url")).toString();
+        device.remoteComputerUrl = object.value(QStringLiteral("remote_computer_url")).toString();
         const QJsonObject phone = phoneByKey.value(device.phoneKeyId);
         if (const qint64 expiry = qint64(phone.value(QStringLiteral("certificate_expires_at_ms")).toDouble())) {
             device.certificateExpiry = QDateTime::fromMSecsSinceEpoch(expiry);

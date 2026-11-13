@@ -23,6 +23,7 @@ import uuid
 import ssl
 import threading
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -377,6 +378,61 @@ def kdeconnect_endpoint(device_id, environment=None, account=None, *, refresh=Fa
     raise ConnectionError("Phone not found after KDE Connect network discovery")
 
 
+def kdeconnect_addresses(device_id, environment=None, account=None, timeout=5):
+    """IP addresses KDE Connect currently associates with the paired device (may be stale)."""
+    import ipaddress
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", device_id):
+        raise ValueError("Invalid KDE Connect device ID")
+    options = {}
+    if account is not None:
+        options = dict(user=account.pw_uid, group=account.pw_gid, extra_groups=[], cwd="/",
+                       env={"PATH": "/usr/bin:/bin", "HOME": account.pw_dir,
+                            "DBUS_SESSION_BUS_ADDRESS": (environment or {}).get("DBUS_SESSION_BUS_ADDRESS", ""),
+                            "XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"})
+    result = subprocess.run(["/usr/bin/qdbus6", "org.kde.kdeconnect", "/modules/kdeconnect/devices/" + device_id,
+                             "org.freedesktop.DBus.Properties.Get", "org.kde.kdeconnect.device", "reachableAddresses"],
+                            capture_output=True, timeout=timeout, check=True, **options)
+    addresses = []
+    for candidate in result.stdout.decode(errors="replace").split()[:8]:
+        try:
+            address = ipaddress.ip_address(candidate.strip())
+        except ValueError:
+            continue
+        if address.is_private and not address.is_loopback and not address.is_unspecified and not address.is_multicast:
+            addresses.append(str(address))
+    return addresses
+
+
+def lan_present(addresses, timeout=2.0, ports=(1716, 39841)):
+    """Whether the phone answers on the local network right now.
+
+    KDE Connect can report a phone as reachable for a while after it left Wi-Fi. A TCP
+    connection to its KDE Connect (1716) or Navi (39841) port that connects *or is refused*
+    proves the device is on the network; only timeouts and "host unreachable" count as absent.
+    Returns None when there is no address to test (e.g. a Bluetooth link): trust KDE Connect.
+    """
+    if not addresses:
+        return None
+    present = threading.Event()
+    def probe(host, port):
+        try:
+            socket.create_connection((host, port), timeout=timeout).close()
+            present.set()
+        except ConnectionRefusedError:
+            present.set()
+        except OSError:
+            pass
+    workers = [threading.Thread(target=probe, args=(host, port), daemon=True) for host in addresses for port in ports]
+    for worker in workers:
+        worker.start()
+    deadline = time.monotonic() + timeout + 0.2
+    for worker in workers:
+        worker.join(max(0, deadline - time.monotonic()))
+        if present.is_set():
+            return True
+    return present.is_set()
+
+
 def envelope(key, payload):
     raw = encode(payload)
     return {"payload_b64": b64(raw), "signature_b64": b64(key.sign(raw, ec.ECDSA(hashes.SHA256())))}
@@ -397,6 +453,9 @@ def validate_context(context):
         raise ValueError("command_hidden must be boolean.")
     if context.get("command_hidden") and context.get("command"):
         raise ValueError("Hidden command must be empty.")
+    if "icon_sha256" in context and (not isinstance(context["icon_sha256"], str)
+                                     or not re.fullmatch(r"[0-9a-f]{64}", context["icon_sha256"])):
+        raise ValueError("Invalid requester icon hash.")
     encoded = context.get("icon_png_base64", "")
     if not isinstance(encoded, str) or len(encoded) > 22000:
         raise ValueError("Requester icon is too large.")
@@ -418,6 +477,46 @@ def kdeconnect_module():
 
 def kdeconnect_transport():
     return kdeconnect_module().KdeConnectPhone
+
+
+_REMOTE_MODULE = None
+
+
+def remote_module():
+    global _REMOTE_MODULE
+    if _REMOTE_MODULE is None:
+        spec = importlib.util.spec_from_file_location("navi_ntfy_transport", Path(__file__).with_name("ntfy_transport.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _REMOTE_MODULE = module
+    return _REMOTE_MODULE
+
+
+def remote_config(db, key_id):
+    """Remote approval (ntfy) settings for an approved phone, or None."""
+    try:
+        row = db.execute("SELECT server, token, phone_topic, computer_topic, key FROM remote WHERE key_id=?", (key_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None:
+        return None
+    return dict(server=row[0], token=row[1], phone_topic=row[2], computer_topic=row[3], key=bytes(row[4]))
+
+
+def remote_servers(db):
+    try:
+        return dict(db.execute("SELECT key_id, server FROM remote").fetchall())
+    except sqlite3.OperationalError:
+        return {}
+
+
+def remote_topic_urls(db):
+    """Web addresses of each phone's two ntfy topics, for viewing the (encrypted) traffic."""
+    try:
+        rows = db.execute("SELECT key_id, server, phone_topic, computer_topic FROM remote").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {key_id: (f"{server.rstrip('/')}/{phone}", f"{server.rstrip('/')}/{computer}") for key_id, server, phone, computer in rows}
 
 
 # --- Output -----------------------------------------------------------------
@@ -519,11 +618,16 @@ def enrolled_devices(db):
 
 def known_devices(db):
     enrolled = enrolled_devices(db)
+    remotes = remote_servers(db)
+    topics = remote_topic_urls(db)
     devices = kdeconnect_module().list_devices()
     for device in devices:
         record = enrolled.get(device["id"])
         device["enrolled"] = record is not None
         device["phone_key_id"] = record["key_id"] if record else None
+        device["remote"] = remotes.get(device["phone_key_id"]) if record else None
+        urls = topics.get(device["phone_key_id"]) if record else None
+        device["remote_phone_url"], device["remote_computer_url"] = urls if urls else (None, None)
     return devices
 
 
@@ -531,7 +635,8 @@ def device_label(device):
     state = "reachable" if device["reachable"] else "offline"
     if device["reachable"] and not device["share"]:
         state = "file sharing disabled"
-    return f"{device['name']} · {state} · {'enrolled' if device['enrolled'] else 'not enrolled'}"
+    remote = f" · remote: {device['remote']}" if device.get("remote") else ""
+    return f"{device['name']} · {state} · {'enrolled' if device['enrolled'] else 'not enrolled'}{remote}"
 
 
 def select_device(db, query, purpose):
@@ -581,8 +686,27 @@ def select_device(db, query, purpose):
 
 def approve(args, db, machine_key, root):
     enrolling = args.command == "enroll"
+    setup = args.command == "remote-setup"
+    for name in ("serial", "endpoint", "kdeconnect_device", "kdeconnect_messages", "phone_key_id", "context_file",
+                 "desktop_request_id", "icon_file"):
+        if not hasattr(args, name):
+            setattr(args, name, None)
+    for name in ("notification_only", "remote_only"):
+        if not hasattr(args, name):
+            setattr(args, name, False)
+    for name, value in (("operation", ""), ("application", "Navi remote approvals"), ("action_id", "remote-setup"),
+                        ("requested_command", ""), ("target_user", ""), ("icon_name", "network-wireless")):
+        if not hasattr(args, name):
+            setattr(args, name, value)
     device = None
     leaf = None
+    setup_key = None
+    if setup:
+        # Remote setup travels over the phone's normal route (KDE Connect messages).
+        device = select_device(db, args.setup_device, "authenticate")
+        args.kdeconnect_messages = device["id"]
+        args.phone_key_id = device["phone_key_id"] or args.phone_key_id
+        setup_key = ec.generate_private_key(ec.SECP256R1())
     if enrolling and not args.serial:
         # Release enrollment: the code shown here pins this machine on the phone.
         device = select_device(db, args.kdeconnect_device, "enroll")
@@ -593,12 +717,12 @@ def approve(args, db, machine_key, root):
         leaf = certificate(public, root, machine_key, "Phone " + identity["key_id_sha256"][:32])
         phone = kdeconnect_transport()(sys.modules[__name__], device["id"], machine_key, root, leaf)
         phone.check()
-    elif not enrolling and not (args.endpoint or args.serial or args.kdeconnect_device or args.kdeconnect_messages):
+    elif not enrolling and not setup and not (args.endpoint or args.serial or args.kdeconnect_device or args.kdeconnect_messages):
         # Default authentication route: signed messages over the enrolled phone's KDE Connect pairing.
         device = select_device(db, None, "authenticate")
         args.kdeconnect_messages = device["id"]
         args.phone_key_id = args.phone_key_id or device["phone_key_id"]
-    elif not enrolling:
+    elif not enrolling and not setup:
         for name in ("kdeconnect_messages", "kdeconnect_device"):
             if getattr(args, name):
                 device = select_device(db, getattr(args, name), "authenticate")
@@ -612,18 +736,47 @@ def approve(args, db, machine_key, root):
         if len(rows) != 1:
             raise ValueError("Select one already-approved phone with --phone-key-id")
         leaf = x509.load_der_x509_certificate(bytes(rows[0][0]))
-        if args.kdeconnect_messages:
-            phone = kdeconnect_transport()(sys.modules[__name__], args.kdeconnect_messages, machine_key, root, leaf)
-        else:
+        remote = None if setup else remote_config(db, digest(spki(leaf.public_key())))
+
+        def make_primary():
+            if args.kdeconnect_messages:
+                return kdeconnect_transport()(sys.modules[__name__], args.kdeconnect_messages, machine_key, root, leaf)
             resolver = (lambda **options: kdeconnect_endpoint(args.kdeconnect_device, **options)) if args.kdeconnect_device else None
+            return NetworkPhone(args.endpoint, machine_key, root, leaf, resolver)
+
+        def make_remote():
+            if remote is None:
+                raise ValueError("Remote approvals are not set up for this phone (System Settings → Remote approvals)")
+            return remote_module().RemotePhone(sys.modules[__name__], remote, machine_key, root, leaf)
+
+        if args.remote_only:
+            phone = make_remote()
+            phone.check()
+            emit("step", step="route", route="ntfy")
+            say(f"Route: ntfy ({remote['server']})")
+        elif remote is not None:
+            # KDE Connect decides: the normal route when it sees the phone, ntfy otherwise.
+            probe = None
+            if args.kdeconnect_messages:
+                # KDE Connect's "reachable" can be stale after Wi-Fi drops: confirm the phone answers.
+                probe = lambda: lan_present(kdeconnect_addresses(args.kdeconnect_messages))
+            phone = remote_module().RoutedPhone(make_primary, make_remote, probe=probe)
+            phone.check()
+            route = "ntfy" if phone.route == "remote" else "kdeconnect" if args.kdeconnect_messages else "network"
+            emit("step", step="route", route=route)
+            say(f"Route: {route}" + (f" ({remote['server']}): the phone is not reachable on the local network" if route == "ntfy" else ""))
+        else:
+            phone = None
             try:
-                phone = NetworkPhone(args.endpoint, machine_key, root, leaf, resolver)
+                phone = make_primary()
                 phone.check()
             except (OSError, ConnectionError, TimeoutError) as error:
+                if phone is not None and hasattr(phone, "close"):
+                    phone.close()
+                if args.kdeconnect_messages:
+                    raise
                 raise ConnectionError("Phone not reachable over the network. In Navi, ☰ → Settings → Enable network "
                                       f"authentication, and keep the phone on the same network as this computer. ({error})") from error
-        if args.kdeconnect_messages:
-            phone.check()
     else:
         phone = Phone(args.serial)
     identity = phone.identity()
@@ -650,11 +803,12 @@ def approve(args, db, machine_key, root):
     machine_id = digest(spki(root.public_key()))
     request_id = secrets.token_hex(16)
     now = int(time.time() * 1000)
-    payload = {"domain": DOMAIN, "kind": "enroll" if enrolling else "authenticate",
+    payload = {"domain": DOMAIN, "kind": "enroll" if enrolling else "remote-setup" if setup else "authenticate",
                "request_id": request_id, "nonce": b64(secrets.token_bytes(32)),
                "machine_id": machine_id, "phone_key_id": key_id,
                "certificate_sha256": digest(leaf_der), "machine_name": socket.gethostname(),
-               "operation": "Approve this phone for this computer" if enrolling else args.operation,
+               "operation": "Approve this phone for this computer" if enrolling
+                   else "Allow remote approvals through " + urlsplit(args.server).netloc if setup else args.operation,
                "issued_at_ms": now, "expires_at_ms": now + TTL * 1000}
     local_user = pwd.getpwuid(os.getuid()).pw_name
     payload["context"] = {
@@ -668,7 +822,14 @@ def approve(args, db, machine_key, root):
         "icon_name": "dialog-password" if enrolling else args.icon_name,
         "icon_png_base64": "" if enrolling or args.icon_file is None else b64(args.icon_file.read_bytes()),
     }
-    if not enrolling and args.context_file:
+    if setup:
+        payload["context"].update(application="Navi remote approvals", action_id="remote-setup", command="",
+                                  target_user=local_user, icon_name="network-wireless", icon_png_base64="")
+        payload["remote_setup"] = {"server": args.server,
+                                   "machine_ecdh_spki_b64": b64(spki(setup_key.public_key()))}
+        if args.token:
+            payload["remote_setup"]["token"] = args.token
+    if not enrolling and not setup and args.context_file:
         if args.context_file.stat().st_size > 65536:
             raise ValueError("Desktop context is too large.")
         context = json.loads(args.context_file.read_bytes())
@@ -682,6 +843,14 @@ def approve(args, db, machine_key, root):
         if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.desktop_request_id):
             raise ValueError("Invalid desktop request UUID.")
         payload["context"]["desktop_request_id"] = args.desktop_request_id
+    if isinstance(phone, remote_module().RoutedPhone) or args.remote_only:
+        payload["remote"] = {"kind": "ntfy"}  # Navi may answer over ntfy, e.g. after Wi-Fi drops.
+        if getattr(phone, "route", "remote") == "remote" and payload["context"].get("icon_png_base64"):
+            # Over ntfy only the signed icon hash travels; Navi asks for the PNG if it lacks it.
+            png = unb64(payload["context"]["icon_png_base64"])
+            payload["context"]["icon_sha256"] = digest(png)
+            payload["context"]["icon_png_base64"] = ""
+            phone.set_icon(png)
     validate_context(payload["context"])
     if hasattr(phone, "transport"):
         payload["transport"] = phone.transport
@@ -708,7 +877,15 @@ def approve(args, db, machine_key, root):
                 if raw != encode(payload) or response["phone_certificate_b64"] != b64(leaf_der):
                     raise ValueError("Response does not match the outstanding challenge and certificate.")
                 signature = unb64(response["signature_b64"])
-                leaf.public_key().verify(signature, raw, ec.ECDSA(hashes.SHA256()))
+                signed = raw
+                if setup:
+                    # The phone signs its fresh ECDH key together with this exact setup request.
+                    phone_ecdh_der = unb64(response["phone_ecdh_spki_b64"])
+                    phone_ecdh = serialization.load_der_public_key(phone_ecdh_der)
+                    if not isinstance(phone_ecdh, ec.EllipticCurvePublicKey) or not isinstance(phone_ecdh.curve, ec.SECP256R1):
+                        raise ValueError("The phone's remote key must be P-256.")
+                    signed = raw + b"\n" + phone_ecdh_der
+                leaf.public_key().verify(signature, signed, ec.ECDSA(hashes.SHA256()))
                 validate_certificate(leaf, root)
                 if time.monotonic() >= deadline:
                     raise ValueError("Approval arrived after the challenge expired.")
@@ -718,6 +895,11 @@ def approve(args, db, machine_key, root):
                                          (request_id,)).rowcount
                     if changed != 1:
                         raise ValueError("Challenge was already consumed or canceled.")
+                    if setup:
+                        derived = remote_module().derive(setup_key.exchange(ec.ECDH(), phone_ecdh), request_id)
+                        db.execute("INSERT OR REPLACE INTO remote VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                   (key_id, args.server, args.token, derived["phone_topic"], derived["computer_topic"],
+                                    derived["key"], int(time.time() * 1000)))
                     if enrolling:
                         db.execute("INSERT OR REPLACE INTO approved VALUES (?, ?)", (key_id, leaf_der))
                         db.execute("INSERT OR REPLACE INTO devices VALUES (?, ?, ?, ?)",
@@ -733,9 +915,11 @@ def approve(args, db, machine_key, root):
                 phone.write("receipt.json", receipt)
                 emit("step", step="receipt-sent")
                 say("ENROLLED: this machine signed and approved the phone public key." if enrolling
+                    else f"REMOTE APPROVALS ENABLED through {args.server}; used when KDE Connect can't see the phone." if setup
                     else "VERIFIED (notification-only): phone approval verified; desktop authentication is separate."
                     if args.notification_only else "AUTHENTICATED: approved phone certificate and fresh phone signature verified.")
-                emit("done", result="enrolled" if enrolling else "verified" if args.notification_only else "authenticated",
+                emit("done", result="enrolled" if enrolling else "remote-enabled" if setup
+                     else "verified" if args.notification_only else "authenticated",
                      phone_key_id=key_id, device_id=device["id"] if device else None)
                 return
             time.sleep(1)
@@ -846,8 +1030,9 @@ def authority_status():
         print("Authority machine ID:", status.get("machine_key_id"))
         for phone in status.get("phones", []):
             state = "enabled" if phone.get("enabled") else "revoked"
+            remote = f" · remote: {phone['remote']}" if phone.get("remote") else ""
             print(f"  {phone['phone_key_id']} · {state} · {phone.get('transport')} · {phone.get('kdeconnect_device') or '-'}"
-                  f" · certificate expires {(phone.get('certificate_expires') or '?')[:10]}")
+                  f" · certificate expires {(phone.get('certificate_expires') or '?')[:10]}{remote}")
         if kdesu_navi is False and any(phone.get("enabled") for phone in status.get("phones", [])):
             print(f"WARNING: {KDESU} is not the Navi-patched kdesu, so administrator prompts never reach the phone.")
             print("  A system update probably replaced kde-plasma/kdesu-gui; reinstall the Navi-patched build (see INSTALL).")
@@ -864,9 +1049,11 @@ def show_status(root):
             query = ("SELECT a.key_id, a.certificate, d.kdeconnect_device, d.device_name, d.enrolled_at FROM approved a "
                      "LEFT JOIN devices d ON d.key_id = a.key_id" if has_devices else
                      "SELECT key_id, certificate, NULL, NULL, NULL FROM approved")
+            remotes = remote_servers(db)
             for key_id, cert, device_id, name, enrolled_at in db.execute(query):
                 phones.append(dict(phone_key_id=key_id, kdeconnect_device=device_id, device_name=name,
-                                   enrolled_at_ms=enrolled_at, certificate_expires_at_ms=certificate_expiry(bytes(cert))))
+                                   enrolled_at_ms=enrolled_at, certificate_expires_at_ms=certificate_expiry(bytes(cert)),
+                                   remote=remotes.get(key_id)))
     if JSON_MODE:
         emit("status", initialized=root is not None, machine_id=machine_id, state_dir=str(STATE), phones=phones)
         return
@@ -878,7 +1065,8 @@ def show_status(root):
     for phone in phones:
         expires = datetime.fromtimestamp(phone["certificate_expires_at_ms"] / 1000, timezone.utc).date()
         label = f" · {phone['device_name']}" if phone["device_name"] else ""
-        print(f"Approved phone: {phone['phone_key_id']}{label} · certificate expires {expires}")
+        remote = f" · remote approvals: {phone['remote']}" if phone["remote"] else ""
+        print(f"Approved phone: {phone['phone_key_id']}{label} · certificate expires {expires}{remote}")
 
 
 def main():
@@ -897,6 +1085,13 @@ def main():
     authority_revoke = sub.add_parser("authority-revoke",
                                       help="Disable a KDE Connect device for administrator prompts (no password needed)")
     authority_revoke.add_argument("kdeconnect_device", metavar="DEVICE_ID")
+    remote_setup = sub.add_parser("remote-setup", help="Let a phone approve over ntfy when KDE Connect can't see it")
+    remote_setup.add_argument("--kdeconnect-device", dest="setup_device", metavar="ID_OR_NAME",
+                              help="Enrolled phone (asks when several are enrolled)")
+    remote_setup.add_argument("--server", default="https://ntfy.sh", help="ntfy server (default https://ntfy.sh)")
+    remote_setup.add_argument("--token", help="ntfy access token, for a server with access control")
+    remote_remove = sub.add_parser("remote-remove", help="Stop using ntfy for a phone")
+    remote_remove.add_argument("--kdeconnect-device", dest="setup_device", metavar="ID_OR_NAME")
     for name in ("enroll", "authenticate"):
         command = sub.add_parser(name)
         transport = command.add_mutually_exclusive_group()
@@ -920,8 +1115,13 @@ def main():
             command.add_argument("--context-file", type=Path, help="Desktop broker context JSON, signed verbatim after validation")
             command.add_argument("--desktop-request-id", help="Associated desktop dialog UUID")
             command.add_argument("--notification-only", action="store_true", help="Verify phone approval without authorizing desktop execution")
+            command.add_argument("--remote-only", action="store_true", help="Send over ntfy even if KDE Connect can see the phone (test)")
     args = parser.parse_args()
     JSON_MODE = args.json
+    if args.command == "remote-setup":
+        args.server = remote_module().validate_server(args.server)
+        if args.token is not None and not remote_module().TOKEN.fullmatch(args.token):
+            raise ValueError("The ntfy access token may only contain letters, digits, '.', '_' and '-'.")
     STATE = (args.state_dir or default_state()).resolve()
     os.umask(0o077)
     STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -947,11 +1147,14 @@ def main():
         with sqlite3.connect(":memory:", uri=True) as db:
             db.execute("CREATE TABLE approved (key_id TEXT PRIMARY KEY)")
             db.execute("CREATE TABLE devices (key_id TEXT, kdeconnect_device TEXT, device_name TEXT, enrolled_at INTEGER)")
+            db.execute("CREATE TABLE remote (key_id TEXT PRIMARY KEY, server TEXT, phone_topic TEXT, computer_topic TEXT)")
             if database.exists():
                 db.execute("ATTACH DATABASE ? AS saved", (f"file:{database}?mode=ro",))
                 db.execute("INSERT INTO approved SELECT key_id FROM saved.approved")
                 if db.execute("SELECT 1 FROM saved.sqlite_master WHERE name='devices'").fetchone():
                     db.execute("INSERT INTO devices SELECT * FROM saved.devices")
+                if db.execute("SELECT 1 FROM saved.sqlite_master WHERE name='remote'").fetchone():
+                    db.execute("INSERT INTO remote SELECT key_id, server, phone_topic, computer_topic FROM saved.remote")
             devices = known_devices(db)
         if JSON_MODE:
             emit("devices", devices=devices)
@@ -987,6 +1190,9 @@ def main():
             # Display/route metadata only; trust is the approved table and its certificates.
             db.execute("CREATE TABLE IF NOT EXISTS devices (key_id TEXT PRIMARY KEY, kdeconnect_device TEXT, "
                        "device_name TEXT, enrolled_at INTEGER)")
+            # Remote approvals (ntfy): server, derived topics and message key per approved phone.
+            db.execute("CREATE TABLE IF NOT EXISTS remote (key_id TEXT PRIMARY KEY, server TEXT NOT NULL, token TEXT, "
+                       "phone_topic TEXT NOT NULL, computer_topic TEXT NOT NULL, key BLOB NOT NULL, created_at INTEGER)")
             # A process restart cannot revive a previous challenge.
             db.execute("UPDATE requests SET status='canceled' WHERE status='pending'")
             db.commit()
@@ -1000,8 +1206,16 @@ def main():
                 with db:
                     count = db.execute("DELETE FROM approved WHERE key_id=?", (args.key_id,)).rowcount
                     db.execute("DELETE FROM devices WHERE key_id=?", (args.key_id,))
+                    db.execute("DELETE FROM remote WHERE key_id=?", (args.key_id,))
                 say("Revoked." if count else "Key was not approved.")
                 emit("done", result="revoked" if count else "not-approved", phone_key_id=args.key_id)
+            elif args.command == "remote-remove":
+                device = select_device(db, args.setup_device, "authenticate")
+                with db:
+                    count = db.execute("DELETE FROM remote WHERE key_id=?", (device["phone_key_id"],)).rowcount
+                say(f"Remote approvals turned off for {device['name']}. Also turn them off in Navi → ☰ → Settings."
+                    if count else f"Remote approvals were not set up for {device['name']}.")
+                emit("done", result="remote-removed", device_id=device["id"], phone_key_id=device["phone_key_id"])
             else:
                 approve(args, db, machine_key, root)
 

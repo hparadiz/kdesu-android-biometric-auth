@@ -25,7 +25,11 @@ import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
 import org.json.JSONObject;
 
-/** TLS LAN delivery. Every RPC is authenticated with an already pinned computer key. */
+/**
+ * Background delivery: the TLS LAN listener (when network authentication is on) and the ntfy
+ * subscription for remote approvals (when set up). Every LAN RPC is authenticated with an already
+ * pinned computer key; remote messages are validated exactly like KDE Connect deliveries.
+ */
 public final class NetworkService extends Service {
     static final int PORT = 39841;
     private static final int LIMIT = 131072;
@@ -33,7 +37,11 @@ public final class NetworkService extends Service {
     static final String CHANNEL = "computer_connection";
     private static final int RECOVERY_NOTIFICATION_ID = 3;
     static volatile String status = "Network connection is off";
+    static volatile String remoteStatus = "";
     static volatile boolean running;
+    private boolean lanStarted;
+    private Thread remoteThread;
+    private volatile java.net.HttpURLConnection remoteConnection;
     private volatile SSLServerSocket listener;
     private volatile boolean stopping;
     private Thread listenerThread;
@@ -46,8 +54,27 @@ public final class NetworkService extends Service {
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
+    /** Direct network (LAN) authentication is enabled. */
     static boolean enabled(Context context) {
         return context.getSharedPreferences("network", 0).getBoolean("enabled", false);
+    }
+
+    /** The service runs for the LAN listener, remote approvals over ntfy, or both. */
+    static boolean shouldRun(Context context) {
+        return enabled(context) || RemoteChannel.configured(context);
+    }
+
+    /** Applies a changed LAN or remote setting: restart with exactly the enabled parts. */
+    static void restart(Context context) {
+        Intent intent = new Intent(context, NetworkService.class);
+        context.stopService(intent);
+        if (shouldRun(context)) context.startForegroundService(intent);
+    }
+
+    private String combinedStatus() {
+        String lan = enabled(this) ? status : "";
+        if (remoteStatus.isEmpty()) return lan.isEmpty() ? "Starting…" : lan;
+        return lan.isEmpty() ? remoteStatus : lan + "\n" + remoteStatus;
     }
 
     static void createChannel(Context context) {
@@ -70,7 +97,7 @@ public final class NetworkService extends Service {
         PendingIntent setup = PendingIntent.getActivity(this, 2, new Intent(this, BackgroundSetupActivity.class), PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder builder = new Notification.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_notification)
                 .setContentTitle("Navi · computer authentication")
-                .setContentText(status).setStyle(new Notification.BigTextStyle().bigText(status
+                .setContentText(combinedStatus()).setStyle(new Notification.BigTextStyle().bigText(combinedStatus()
                         + "\nListening in the background for your paired computers."))
                 .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false)
                 .addAction(new Notification.Action.Builder(null, "Background setup", setup).build())
@@ -87,8 +114,16 @@ public final class NetworkService extends Service {
         }
     }
 
+    private void publishRemoteStatus(String message) {
+        synchronized (mailbox) {
+            if (stopping) return;
+            remoteStatus = message;
+            getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, notification());
+        }
+    }
+
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        if (!enabled(this)) {
+        if (!shouldRun(this)) {
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -99,10 +134,17 @@ public final class NetworkService extends Service {
         else
             startForeground(NOTIFICATION_ID, notification());
         getSystemService(NotificationManager.class).cancel(RECOVERY_NOTIFICATION_ID);
-        if (!running) {
-            running = true;
+        running = true;
+        if (enabled(this) && !lanStarted) {
+            lanStarted = true;
             listenerThread = new Thread(this::listen, "navi-lan-listener");
             listenerThread.start();
+        }
+        if (RemoteChannel.configured(this) && remoteThread == null) {
+            remoteStatus = "Remote: connecting…";
+            remoteThread = new Thread(() -> RemoteChannel.listen(this, () -> stopping, this::publishRemoteStatus,
+                    connection -> remoteConnection = connection), "navi-remote-listener");
+            remoteThread.start();
         }
         return START_STICKY;
     }
@@ -121,7 +163,7 @@ public final class NetworkService extends Service {
                 status = "Open Navi and enable network authentication again";
                 Log.e("PhoneAuthenticator", "LAN identity unavailable", error);
                 showRecoveryNotification(this);
-                stopSelf();
+                if (!RemoteChannel.configured(this)) stopSelf(); // Remote approvals keep running.
             }
             return;
         }
@@ -226,6 +268,7 @@ public final class NetworkService extends Service {
                 } catch (Challenge.Expired expired) { /* Old request no longer owns the mailbox. */ }
             }
             bridge.write(name, value);
+            KdeConnectInbox.recordRoute(bridge, id, KdeConnectInbox.ROUTE_LAN);
             RequestReceiver.refreshNotification(this, id, false);
             return null;
         }
@@ -283,6 +326,10 @@ public final class NetworkService extends Service {
         synchronized (mailbox) { stopping = true; }
         try { if (listener != null) listener.close(); } catch (Exception ignored) { }
         if (listenerThread != null) listenerThread.interrupt();
+        java.net.HttpURLConnection connection = remoteConnection;
+        if (connection != null) connection.disconnect();
+        if (remoteThread != null) remoteThread.interrupt();
+        remoteStatus = "";
         clients.shutdownNow();
         for (SSLSocket socket : sockets) { try { socket.close(); } catch (Exception ignored) { } }
         deadlines.cancel();

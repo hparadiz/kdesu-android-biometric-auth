@@ -204,14 +204,45 @@ void NaviAuthKcm::sendTest(const QString &deviceId, const QString &transport)
         return;
     }
     // Network: host.py resolves the phone's current LAN address through KDE Connect and opens Navi's
-    // pinned TLS connection, the same route kdesu uses with the LAN transport.
-    m_testOverNetwork = transport == QLatin1String("network");
-    startTask(QStringLiteral("test"), deviceId,
-              {QStringLiteral("authenticate"), m_testOverNetwork ? QStringLiteral("--kdeconnect-device") : QStringLiteral("--kdeconnect-messages"),
-               deviceId, QStringLiteral("--phone-key-id"), device->phoneKeyId, QStringLiteral("--notification-only"),
-               QStringLiteral("--application"), QStringLiteral("System Settings"), QStringLiteral("--operation"),
-               m_testOverNetwork ? QStringLiteral("Test network approval from System Settings")
-                                 : QStringLiteral("Test approval from System Settings")});
+    // pinned TLS connection, the same route kdesu uses with the LAN transport. Remote: ntfy only.
+    m_testTransport = transport;
+    const bool network = transport == QLatin1String("network");
+    QStringList arguments{QStringLiteral("authenticate"), network ? QStringLiteral("--kdeconnect-device") : QStringLiteral("--kdeconnect-messages"),
+                          deviceId, QStringLiteral("--phone-key-id"), device->phoneKeyId, QStringLiteral("--notification-only"),
+                          QStringLiteral("--application"), QStringLiteral("System Settings"), QStringLiteral("--operation"),
+                          network ? QStringLiteral("Test network approval from System Settings")
+                          : transport == QLatin1String("remote") ? QStringLiteral("Test remote approval from System Settings")
+                                                                 : QStringLiteral("Test approval from System Settings")};
+    if (transport == QLatin1String("remote")) {
+        arguments << QStringLiteral("--remote-only");
+    }
+    startTask(QStringLiteral("test"), deviceId, arguments);
+}
+
+void NaviAuthKcm::setupRemote(const QString &deviceId, const QString &server, const QString &token)
+{
+    const DeviceModel::Device *device = m_devices->find(deviceId);
+    if (!device || !device->enrolled) {
+        return;
+    }
+    QStringList arguments{QStringLiteral("remote-setup"), QStringLiteral("--kdeconnect-device"), deviceId,
+                          QStringLiteral("--server"), server.trimmed().isEmpty() ? QStringLiteral("https://ntfy.sh") : server.trimmed()};
+    if (!token.trimmed().isEmpty()) {
+        arguments << QStringLiteral("--token") << token.trimmed();
+    }
+    // Administrator prompts keep a root copy of the remote settings: refresh it afterwards.
+    m_updateAdminAfter = device->adminState == QLatin1String("enabled") ? deviceId : QString();
+    startTask(QStringLiteral("remote-setup"), deviceId, arguments);
+}
+
+void NaviAuthKcm::removeRemote(const QString &deviceId)
+{
+    const DeviceModel::Device *device = m_devices->find(deviceId);
+    if (!device) {
+        return;
+    }
+    m_updateAdminAfter = device->adminState == QLatin1String("enabled") ? deviceId : QString();
+    startTask(QStringLiteral("remote-remove"), deviceId, {QStringLiteral("remote-remove"), QStringLiteral("--kdeconnect-device"), deviceId});
 }
 
 void NaviAuthKcm::revoke(const QString &deviceId)
@@ -377,6 +408,10 @@ void NaviAuthKcm::handleEvent(const QJsonObject &event)
         Q_EMIT progressChanged();
     } else if (name == QLatin1String("step")) {
         const QString step = event.value(QStringLiteral("step")).toString();
+        if (step == QLatin1String("route")) {
+            m_route = event.value(QStringLiteral("route")).toString();
+            return;
+        }
         if (step != QLatin1String("offer-sent") || m_code.isEmpty()) {
             m_step = step;
         }
@@ -424,9 +459,17 @@ void NaviAuthKcm::taskExited(int exitCode, QProcess::ExitStatus status)
         if (task == QLatin1String("enroll")) {
             result = i18n("%1 is enrolled. Use “Send test” to try an approval.", m_taskDeviceName);
         } else if (task == QLatin1String("test")) {
-            result = m_testOverNetwork
+            result = m_route == QLatin1String("ntfy") && m_testTransport != QLatin1String("remote")
+                ? i18n("%1 approved the test over ntfy (KDE Connect couldn't see the phone) with a verified signature.", m_taskDeviceName)
+                : m_testTransport == QLatin1String("remote")
+                ? i18n("%1 approved the test over ntfy (remote approvals) with a verified signature.", m_taskDeviceName)
+                : m_testTransport == QLatin1String("network")
                 ? i18n("%1 approved the test over the direct network connection with a verified signature.", m_taskDeviceName)
                 : i18n("%1 approved the test over KDE Connect messages with a verified signature.", m_taskDeviceName);
+        } else if (task == QLatin1String("remote-setup")) {
+            result = i18n("%1 can now approve over ntfy when KDE Connect can't see it.", m_taskDeviceName);
+        } else if (task == QLatin1String("remote-remove")) {
+            result = i18n("Remote approvals are off for %1. Also turn them off in Navi → ☰ → Settings.", m_taskDeviceName);
         } else if (task == QLatin1String("revoke")) {
             result = m_authorityRevoked
                 ? i18n("%1 can no longer approve requests from this account or administrator prompts.", m_taskDeviceName)
@@ -457,6 +500,16 @@ void NaviAuthKcm::taskExited(int exitCode, QProcess::ExitStatus status)
     }
     if (task != QLatin1String("authority-revoke")) {
         m_authorityRevoked = false;
+    }
+    m_route.clear();
+    const QString updateAdmin = std::exchange(m_updateAdminAfter, QString());
+    if ((task == QLatin1String("remote-setup") || task == QLatin1String("remote-remove")) && success && updateAdmin == deviceId
+        && canEnableAdministratorPrompts()) {
+        // Copy the changed remote settings into the protected administrator entry (password prompt).
+        setMessages(QString(), result);
+        Q_EMIT taskChanged();
+        enableAdministratorPrompts(deviceId);
+        return;
     }
     setMessages(error, result);
     Q_EMIT taskChanged();

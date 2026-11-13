@@ -206,3 +206,31 @@ direct TLS; it is not the file-sharing transport. The protected configurator
 supports `lan` and `kdeconnect-share`. These modes require KDE Connect/D-Bus
 dependencies where used. The dedicated new KDE Connect plugin is unfinished and
 is outside this published deployed snapshot.
+
+## Remote approvals (ntfy fallback)
+
+`ntfy_transport.py` adds an optional route for phones KDE Connect cannot see
+(details and threat model in [Remote approvals](REMOTE.md)). `RoutedPhone` wraps
+the normal transport: its `check()` runs the existing reachability test
+(`KdeConnectPhone.check()` / `kdeconnect_endpoint()`); on failure, or when
+delivery on the normal route raises, the same signed messages go over ntfy
+instead. Nothing is published to ntfy while KDE Connect sees the phone.
+
+- Setup is a `remote-setup` request over the normal route. The computer's
+  ephemeral P-256 key is inside the signed payload; Navi signs
+  `payload ‖ "\n" ‖ its ephemeral P-256 SPKI` with the biometric key. Both sides
+  derive the message key and both inbox topic names with HKDF-SHA256 (salt: setup
+  request id); none of them is transmitted.
+- Messages are `base64url(nonce ‖ AES-256-GCM(DEFLATE(json)))` with AAD
+  `navi-remote/v1\n<direction>\n<topic>`; inflate is capped at 64 KiB. Requests carry
+  the signed payload as exact JSON text (`payload_json`); receipts and cancels refer
+  to the request by `request_sha256`; responses carry only the signature. Each side
+  rebuilds the usual mailbox objects and validates them unchanged.
+- Signed requests sent over ntfy carry `remote: {"kind": "ntfy"}` and, instead of
+  the inline PNG, `context.icon_sha256`. Navi caches icons by hash and asks
+  (`icon-request`) for a missing one; the computer answers only with the PNG of the
+  current request.
+- On the computer the HTTP client is a worker process running as the desktop user
+  that moves only ciphertext; in `rootauth.py` the key stays in the root process.
+  On the phone, `NetworkService` holds one streaming subscription per server and
+  resumes from the last message id.

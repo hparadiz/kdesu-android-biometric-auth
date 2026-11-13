@@ -88,7 +88,7 @@ final class Bridge {
             X509Certificate pinned = certificate(pairing.getString("machine_certificate_b64"));
             if (!Arrays.equals(pinned.getPublicKey().getEncoded(), machine.getPublicKey().getEncoded()))
                 throw new IllegalArgumentException("Computer identity does not match the stored pairing.");
-            if (request.kind.equals("authenticate") && !pairing.getString("phone_certificate_b64")
+            if ((request.kind.equals("authenticate") || request.kind.equals("remote-setup")) && !pairing.getString("phone_certificate_b64")
                     .equals(envelope.getString("phone_certificate_b64"))) {
                 throw new IllegalArgumentException("The phone certificate differs from the approved pairing.");
             }
@@ -164,6 +164,7 @@ final class Bridge {
 
     void reset() throws Exception {
         for (String name : new String[]{"pairings.json", "pairing.json", "identity.json", "network-identity.json", "request.json", "response.json", "receipt.json", "cancel.json", "kde-cancellations.json",
+                "remote.json", "request-route.json",
                 PairingCode.FILE, PairingCode.HELLO}) {
             Files.deleteIfExists(new File(directory, name).toPath());
         }
