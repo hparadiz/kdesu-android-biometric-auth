@@ -1,0 +1,129 @@
+diff -ruN a/kdesu/CMakeLists.txt b/kdesu/CMakeLists.txt
+--- a/kdesu/CMakeLists.txt	2026-11-24 19:15:33.418439472 -0800
++++ b/kdesu/CMakeLists.txt	2026-11-24 19:16:01.666850075 -0800
+@@ -1,5 +1,5 @@
+ add_library(kdesu_dialog STATIC sudlg.cpp sudlg.h commanddetails.cpp commanddetails.h programinfo.cpp programinfo.h phonenotification.cpp phonenotification.h phoneauthclient.cpp phoneauthclient.h)
+-qt_add_resources(kdesu_dialog "requester_icons" PREFIX "/kdesu" FILES icons/codex.svg icons/LICENSE.codex)
++qt_add_resources(kdesu_dialog "requester_icons" PREFIX "/kdesu" FILES icons/codex.svg icons/LICENSE.codex icons/claude.png)
+ target_link_libraries(kdesu_dialog PUBLIC Qt::Widgets Qt::Network KF6::WidgetsAddons KF6::I18n KF6::ConfigCore KF6::CoreAddons KF6::GuiAddons KF6::Su)
+ 
+ add_executable(kdesu_executable kdesu.cpp)
+diff -ruN a/kdesu/icons/README.md b/kdesu/icons/README.md
+--- a/kdesu/icons/README.md	2026-11-24 19:15:33.418562204 -0800
++++ b/kdesu/icons/README.md	2026-11-24 19:16:01.666884065 -0800
+@@ -1 +1,3 @@
+ The Codex glyph is from [Lobe Icons](https://github.com/lobehub/lobe-icons/blob/master/packages/static-svg/icons/codex.svg), retrieved 2026-09-06, under the adjacent MIT license. A neutral rounded background was added for legibility on light and dark desktop palettes. Codex is an OpenAI trademark. Installed `codex` or `com.openai.codex` theme icons take precedence over this fallback.
++
++`claude.png` is the 128×128 `claude-desktop` application icon from Anthropic's official Claude Desktop package (`claude-desktop_1.17180.0_amd64.deb`), retrieved 2026-11-24. Claude is an Anthropic trademark. It is shown for the Claude CLI (`~/.local/share/claude/versions/<version>`, or `claude` on PATH); installed `claude` or `claude-desktop` theme icons take precedence. The Gentoo ebuild copies it here from FILESDIR because patches cannot carry binary files.
+diff -ruN a/kdesu/programinfo.cpp b/kdesu/programinfo.cpp
+--- a/kdesu/programinfo.cpp	2026-11-24 19:15:33.418757263 -0800
++++ b/kdesu/programinfo.cpp	2026-11-24 19:16:01.666693078 -0800
+@@ -6,9 +6,29 @@
+ #include "programinfo.h"
+ 
+ #include <KDesktopFile>
++#include <QDir>
+ #include <QFileInfo>
+ #include <QStandardPaths>
+ 
++namespace
++{
++// An installed `claude` or `claude-desktop` theme icon wins; the Claude desktop app's icon is the fallback.
++QIcon claudeIcon()
++{
++    return QIcon::fromTheme(QStringLiteral("claude"), QIcon::fromTheme(QStringLiteral("claude-desktop"), QIcon(QStringLiteral(":/kdesu/icons/claude.png"))));
++}
++
++// The Claude CLI runs as a versioned binary, ~/.local/share/claude/versions/<version>, with no desktop
++// entry or icon of its own (the `claude` command is a symlink to it).
++bool isClaudeCli(const QString &executable)
++{
++    const QString canonical = QFileInfo(executable).canonicalFilePath();
++    const QString versions = QDir::homePath() + QStringLiteral("/.local/share/claude/versions/");
++    return !canonical.isEmpty() && canonical.startsWith(versions) && !canonical.mid(versions.size()).contains(QLatin1Char('/'))
++        && QFileInfo(canonical).isExecutable();
++}
++}
++
+ ProgramInfo programInfo(const QString &executable)
+ {
+     const QString name = QFileInfo(executable).fileName();
+@@ -16,6 +36,10 @@
+     if (name.isEmpty()) {
+         return info;
+     }
++    // Its basename is a version number, so recognise it before the basename check below.
++    if (isClaudeCli(executable)) {
++        return {QStringLiteral("Claude"), claudeIcon()};
++    }
+     // An arbitrary path with the same basename is not the desktop application.
+     if (executable.contains(QLatin1Char('/'))
+         && (QFileInfo(executable).canonicalFilePath().isEmpty()
+@@ -28,6 +52,10 @@
+         info.icon =
+             QIcon::fromTheme(QStringLiteral("codex"), QIcon::fromTheme(QStringLiteral("com.openai.codex"), QIcon(QStringLiteral(":/kdesu/icons/codex.svg"))));
+     }
++    if (name == QLatin1String("claude")) {
++        info.name = QStringLiteral("Claude");
++        info.icon = claudeIcon();
++    }
+     const QStringList desktopNames = {name + QStringLiteral(".desktop"), QStringLiteral("org.kde.") + name + QStringLiteral(".desktop")};
+     for (const QString &desktopName : desktopNames) {
+         const QString path = QStandardPaths::locate(QStandardPaths::ApplicationsLocation, desktopName);
+diff -ruN a/kdesu/sudlg.cpp b/kdesu/sudlg.cpp
+--- a/kdesu/sudlg.cpp	2026-11-24 19:15:33.419897085 -0800
++++ b/kdesu/sudlg.cpp	2026-11-24 19:16:01.666798938 -0800
+@@ -121,6 +121,9 @@
+     if (iconName.isEmpty() && requester.name == QLatin1String("Codex")) {
+         iconName = QStringLiteral("codex");
+     }
++    if (iconName.isEmpty() && requester.name == QLatin1String("Claude")) {
++        iconName = QStringLiteral("claude");
++    }
+     m_notificationContext = {{QStringLiteral("application"), requester.name},
+                              {QStringLiteral("action_id"), QStringLiteral("org.kde.kdesu.run")},
+                              {QStringLiteral("command"), request.showCommand ? request.command : QString()},
+diff -ruN a/kdesu/tests/dialogtest.cpp b/kdesu/tests/dialogtest.cpp
+--- a/kdesu/tests/dialogtest.cpp	2026-11-24 19:15:33.419035025 -0800
++++ b/kdesu/tests/dialogtest.cpp	2026-11-24 19:16:14.722003828 -0800
+@@ -24,6 +24,7 @@
+ #include <QScopeGuard>
+ #include <QScrollArea>
+ #include <QSignalSpy>
++#include <QDir>
+ #include <QTemporaryDir>
+ #include <QTest>
+ #include <QTextBrowser>
+@@ -171,6 +172,32 @@
+         QCOMPARE(programInfo(unrelatedPath).name, unrelatedPath);
+     }
+ 
++    void claudeIdentityFromVersionedCli()
++    {
++        QTemporaryDir home;
++        QVERIFY(home.isValid());
++        const QByteArray previousHome = qgetenv("HOME");
++        const auto restoreHome = qScopeGuard([&] {
++            qputenv("HOME", previousHome);
++        });
++        qputenv("HOME", home.path().toLocal8Bit());
++        QVERIFY(QDir(home.path()).mkpath(QStringLiteral(".local/share/claude/versions")));
++        const QString executable = home.filePath(QStringLiteral(".local/share/claude/versions/9.9.9"));
++        QFile file(executable);
++        QVERIFY(file.open(QIODevice::WriteOnly));
++        file.close();
++        QVERIFY(file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
++        const ProgramInfo claude = programInfo(executable);
++        QCOMPARE(claude.name, QStringLiteral("Claude"));
++        QVERIFY(!claude.icon.pixmap(56, 56).isNull());
++        QVERIFY(!QIcon(QStringLiteral(":/kdesu/icons/claude.png")).pixmap(56, 56).isNull());
++
++        // Outside the versions directory a version-like name is not Claude.
++        const QString elsewhere = home.filePath(QStringLiteral("9.9.9"));
++        QVERIFY(QFile::copy(executable, elsewhere));
++        QVERIFY(programInfo(elsewhere).name != QStringLiteral("Claude"));
++    }
++
+     void authenticationIdentity()
+     {
+         const QByteArray login = KUser(KUser::UseRealUserID).loginName().toLocal8Bit();

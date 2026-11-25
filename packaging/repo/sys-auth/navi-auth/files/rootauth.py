@@ -95,6 +95,14 @@ def check_implementation(directory=None):
         raise ValueError("Compression dictionary directory is not protected")
     for source in [dictionaries / "DEFAULT", *dictionaries.glob("navi-deflate-*.dict")]:
         trusted_file(source)
+    # Bundled icons are optional (requests then carry their PNG as before), but must be protected if present.
+    icons = directory / "icons"
+    if icons.exists():
+        info = icons.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError("Bundled icon directory is not protected")
+        for source in [icons / "manifest.json", *icons.glob("*.png")]:
+            trusted_file(source)
 
 
 def private_directory(path, mode):
@@ -175,6 +183,9 @@ def validate_start(event, peer_uid, account):
     context.update(action_id="org.kde.kdesu.run", command_hidden=False, requesting_user=account.pw_name,
                    requesting_uid=peer_uid, target_user="root", source="kdesu", requester_pid=requester_pid,
                    icon_png_base64=encoded, mode="execute", desktop_request_id=event["request_id"])
+    # The agent or terminal behind kdesu (e.g. Claude, Konsole) as a bundled icon named by hash; else
+    # kdesu's own PNG, reduced to its hash when Navi has it built in.
+    context = crypto.apply_bundled_icon(context, pid=requester_pid, uid=peer_uid, home=account.pw_dir)
     environment = validate_environment(event["environment"], peer_uid)
     # Environment that can change executable/library/config lookup is never inherited.
     execution_env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root", "USER": "root", "LOGNAME": "root",
@@ -472,7 +483,8 @@ class PhoneAttempt:
             self.delivered = True
             route = {"remote": "ntfy", "kde": "kdeconnect", "lan": "network"}.get(
                 getattr(self.phone, "route", None), "kdeconnect" if self.kde_messages else "network")
-            audit(f"requested request={self.request_id} desktop={desktop_id} phone={self.phone_key_id} route={route}")
+            icon = (self.payload["context"].get("icon_sha256") or "")[:12] or ("png" if self.payload["context"].get("icon_png_base64") else "-")
+            audit(f"requested request={self.request_id} desktop={desktop_id} phone={self.phone_key_id} route={route} icon={icon}")
             while not self.stopping.is_set() and time.monotonic() < deadline:
                 value = await asyncio.to_thread(self.phone.read, "response.json")
                 if self.stopping.is_set():
@@ -874,6 +886,8 @@ async def approve_for_caller(uid, event, writer, loop):
                            "command_hidden": False, "requesting_user": name, "requesting_uid": uid, "target_user": name,
                            "source": "kscreenlocker", "mode": "approve", "icon_name": "system-lock-screen",
                            "icon_png_base64": ""}
+                context = crypto.apply_bundled_icon(context, uid=uid, home=authority.account.pw_dir,
+                                                    default="system-lock-screen")
                 audit(f"unlock-start user={name}")
                 task = asyncio.create_task(authority.approve_only(
                     context, environment, time.monotonic() + UNLOCK_SECONDS,

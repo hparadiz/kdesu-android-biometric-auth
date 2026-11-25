@@ -205,6 +205,8 @@ cd build/kde/kde-cli-tools-6.8.2
 patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.8.2-build-only-kdesu.patch"
 patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.8.2-navi.patch"
 patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.8.2-retry.patch"
+patch -p1 < "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-6.8.2-claude.patch"
+cp "$repo_dir/packaging/kde-repo/kde-plasma/kdesu-gui/files/kdesu-gui-claude.png" kdesu/icons/claude.png
 cmake -S . -B ../out -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_DOC=OFF -DBUILD_TESTING=ON
 cmake --build ../out --parallel 4
@@ -254,7 +256,7 @@ EOF
 #   echo 'sys-auth/navi-auth navi-auth.conf' >> /etc/portage/package.env
 ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.10.0.ebuild manifest
 ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/kde-misc/navi-auth-kcm/navi-auth-kcm-0.9.0.ebuild manifest
-ebuild /var/db/repos/kdesu-biometric-source/packaging/kde-repo/kde-plasma/kdesu-gui/kdesu-gui-6.8.2-r1.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/kde-repo/kde-plasma/kdesu-gui/kdesu-gui-6.8.2-r2.ebuild manifest
 # Keep Plasma upgrades from silently replacing the Navi-patched kdesu with Gentoo's:
 # a newer Plasma then stops with a conflict until a refreshed kdesu-gui ebuild exists.
 install -d -m 0755 /etc/portage/package.mask
@@ -262,7 +264,7 @@ echo 'kde-plasma/kdesu-gui::gentoo' > /etc/portage/package.mask/navi-kdesu
 emerge --pretend --verbose --oneshot \
   '=sys-auth/navi-auth-0.10.0::navi-auth-local' \
   '=kde-misc/navi-auth-kcm-0.9.0::navi-auth-local' \
-  '=kde-plasma/kdesu-gui-6.8.2-r1::navi-kde-local'
+  '=kde-plasma/kdesu-gui-6.8.2-r2::navi-kde-local'
 ```
 
 Resolve any package/keyword/USE differences deliberately for your system; the
@@ -274,7 +276,7 @@ After accepting the exact plan:
 emerge --ask=n --oneshot --usepkg=n --getbinpkg=n --autounmask=n \
   '=sys-auth/navi-auth-0.10.0::navi-auth-local' \
   '=kde-misc/navi-auth-kcm-0.9.0::navi-auth-local' \
-  '=kde-plasma/kdesu-gui-6.8.2-r1::navi-kde-local'
+  '=kde-plasma/kdesu-gui-6.8.2-r2::navi-kde-local'
 ```
 
 The kdesu-gui version must match your Plasma version. If `host.py authority-status`

@@ -128,6 +128,8 @@ def approve_sddm(account):
                        "requesting_user": account.pw_name, "requesting_uid": account.pw_uid,
                        "target_user": account.pw_name, "source": "sddm", "mode": "approve",
                        "icon_name": "system-log-out", "icon_png_base64": ""}
+            context = rootauth.crypto.apply_bundled_icon(context, uid=account.pw_uid, home=account.pw_dir,
+                                                         default="system-log-out")
             rootauth.audit(f"login-start user={account.pw_name}")
 
             async def run():

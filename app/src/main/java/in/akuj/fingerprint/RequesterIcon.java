@@ -9,7 +9,8 @@ import org.json.JSONObject;
 final class RequesterIcon {
     /**
      * The inline icon (cached by hash for later ntfy requests), or, for a request that carries only
-     * {@code icon_sha256}, the cached icon with that hash. Null means: show the default icon.
+     * {@code icon_sha256}, Navi's built-in icon or the cached icon with that hash. Null means: show the
+     * default icon.
      */
     static Bitmap decode(Context context, JSONObject request) {
         String encoded = request.optString("icon_png_base64");
@@ -20,7 +21,7 @@ final class RequesterIcon {
             check(bytes);
             try { IconCache.put(context, Bridge.hash(bytes), bytes); } catch (Exception ignored) { }
         } else {
-            bytes = IconCache.get(context, request.optString("icon_sha256"));
+            bytes = BundledIcons.known(context, request.optString("icon_sha256"));
             if (bytes == null) return null;
         }
         Bitmap result = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);

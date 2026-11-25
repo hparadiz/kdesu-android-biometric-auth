@@ -1,0 +1,51 @@
+{
+ "agents": [
+  "claude"
+ ],
+ "default_theme": "breeze",
+ "icons": {
+  "application-x-executable": {
+   "breeze": "9cc545d338efb6f89a37bf7bb41f85b09b3d03f988822789c1e7deb1569d1f0a",
+   "breeze-dark": "9cc545d338efb6f89a37bf7bb41f85b09b3d03f988822789c1e7deb1569d1f0a"
+  },
+  "claude": {
+   "*": "f20611eb97e27ecbd7adf641fc1b229c72e43b025df63cb6898ff806e074fe78"
+  },
+  "kitty": {
+   "breeze": "428a2ced1b7db8cc62044c36de63dd1fdeca6dd7b22acdbe61ba4f86070fb618",
+   "breeze-dark": "428a2ced1b7db8cc62044c36de63dd1fdeca6dd7b22acdbe61ba4f86070fb618"
+  },
+  "konsole": {
+   "breeze": "6ae2e6f8343165f5fe0d3447d8ee98ca0e84cb5675625d623ce548bc27c64274",
+   "breeze-dark": "6ae2e6f8343165f5fe0d3447d8ee98ca0e84cb5675625d623ce548bc27c64274"
+  },
+  "system-lock-screen": {
+   "breeze": "8ee1ea3950b6d26f6e1060e23d22ab72b2256bc869223dd26a88ea5911fd7a9b",
+   "breeze-dark": "8ee1ea3950b6d26f6e1060e23d22ab72b2256bc869223dd26a88ea5911fd7a9b"
+  },
+  "system-log-out": {
+   "breeze": "fd3fc007a93ccc6e4de2b973cbc25cc9878440cc963764ee605a9ad16c53f045",
+   "breeze-dark": "108e4aa2932c1d3be1587d9e25e24eab0b8638687d449174bc2a02640ae3c04f"
+  },
+  "utilities-terminal": {
+   "breeze": "6ae2e6f8343165f5fe0d3447d8ee98ca0e84cb5675625d623ce548bc27c64274",
+   "breeze-dark": "6ae2e6f8343165f5fe0d3447d8ee98ca0e84cb5675625d623ce548bc27c64274"
+  }
+ },
+ "paths": [
+  [
+   "*/.local/share/claude/versions/*",
+   "claude"
+  ]
+ ],
+ "programs": {
+  "claude": "claude",
+  "claude-desktop": "claude",
+  "kitty": "kitty",
+  "konsole": "konsole"
+ },
+ "themes": [
+  "breeze",
+  "breeze-dark"
+ ]
+}

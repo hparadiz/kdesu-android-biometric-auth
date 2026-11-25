@@ -47,7 +47,7 @@ src_install() {
 pkg_postinst() {
     elog "Commands up to ${NAVI_AUTH_MAX_COMMAND:-10240} characters are offered for phone approval"
     elog "(NAVI_AUTH_MAX_COMMAND). Requests are compressed with the bundled dictionary, so Navi must be"
-    elog "version 0.12.0 or newer."
+    elog "version 0.13.0 or newer."
     # The helper and configurator start /usr/bin/python3 -I; its default must have the modules.
     if ! /usr/bin/python3 -I -c 'import cryptography, dbus, gi' >/dev/null 2>&1; then
         ewarn "The default /usr/bin/python3 ($(/usr/bin/python3 -I -c 'import sys; print(sys.version.split()[0])' 2>/dev/null))"

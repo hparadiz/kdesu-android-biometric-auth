@@ -331,7 +331,7 @@ public final class MainActivity extends Activity {
                 ImageView requester = findViewById(R.id.requester_icon);
                 if (icon == null) requester.setImageResource(R.drawable.ic_requester);
                 else requester.setImageBitmap(icon);
-                // Over ntfy only the icon's hash arrives; the computer sends the PNG when Navi asks.
+                // A hash Navi neither has built in nor cached: over ntfy the computer sends the PNG when asked.
                 iconPending = icon == null && !request.context.optString("icon_sha256").isEmpty()
                         ? request.context.getString("icon_sha256") : null;
                 requester.setContentDescription(request.context.getString("application") + " icon");

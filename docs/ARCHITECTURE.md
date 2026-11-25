@@ -278,9 +278,30 @@ use `RoutedPhone` or a single transport.
   topic derivation keep their fixed `navi-remote/v1` HKDF labels, so upgrading needs
   no new setup.
 - Signed requests sent over ntfy carry `remote: {"kind": "ntfy"}` and, instead of
-  the inline PNG, `context.icon_sha256`. Navi caches icons by hash and asks
-  (`icon-request`) for a missing one; the computer answers only with the PNG of the
-  current request.
+  the inline PNG, `context.icon_sha256`. Navi uses a built-in or cached icon with
+  that hash, otherwise asks (`icon-request`) for it; the computer answers only with
+  the PNG of the current request.
+
+### Requester icons
+
+Navi has common requester icons built in, named by SHA-256: Claude (the desktop
+app's icon, also used for the Claude CLI), Konsole, Kitty, and the generic icons
+kdesu and the PAM helpers use, each rendered for every installed icon theme. They
+are committed files (`icons/<sha256>.png`, `icons/manifest.json`), made by
+`make icons` with kdesu's own rendering, installed under
+`/usr/libexec/navi-auth/icons/` and packaged into Navi's assets. The computer picks
+a request's icon in this order:
+
+1. the process chain above the request (the account's own processes only): an
+   agent such as Claude anywhere in the chain, otherwise the nearest Konsole or
+   Kitty, in the desktop's icon theme (`[Icons] Theme` in `kdeglobals`);
+2. kdesu's own PNG, reduced to its hash when Navi has that exact icon built in;
+3. for sudo, SDDM and the lock screen, a default (`utilities-terminal`,
+   `system-log-out`, `system-lock-screen`).
+
+In cases 1-3 the signed request carries only `icon_sha256`, on every route.
+Anything else travels as before (inline PNG; over ntfy, on request). The icon is a
+display label only. The `requested` journal line records `icon=<hash prefix>`.
 - On the computer the HTTP client is a worker process running as the desktop user
   that moves only ciphertext; in `rootauth.py` the key stays in the root process.
   On the phone, `NetworkService` holds one streaming subscription per server and

@@ -14,6 +14,7 @@ import re
 import secrets
 import signal
 import socket
+import stat
 import struct
 import sqlite3
 import subprocess
@@ -577,6 +578,129 @@ def envelope(key, payload, compress=True):
     if len(raw) > MAX_PAYLOAD:
         raise ValueError(f"Request too large for the phone ({len(raw)} bytes)")
     return {**pack_payload(raw, compress), "signature_b64": b64(key.sign(raw, ec.ECDSA(hashes.SHA256())))}
+
+
+# --- Bundled requester icons ------------------------------------------------
+# icons/manifest.json and icons/<sha256>.png are committed (tools/make_icons.py) and also packaged in
+# Navi. A request that names a bundled icon by hash carries no PNG; Navi shows its built-in copy.
+ICONS = Path(__file__).with_name("icons")
+_bundled = None
+
+
+def bundled_icons():
+    """The icon manifest, or an empty one when no icons are installed (requests then work as before)."""
+    global _bundled
+    if _bundled is None:
+        try:
+            path = ICONS / "manifest.json"
+            if path.stat().st_size > 65536:
+                raise ValueError("oversized")
+            manifest = json.loads(path.read_text())
+            if not isinstance(manifest, dict):
+                raise ValueError("invalid")
+        except (OSError, ValueError):
+            manifest = {}
+        _bundled = manifest
+    return _bundled
+
+
+def bundled_hashes():
+    return {digest for hashes in bundled_icons().get("icons", {}).values() for digest in hashes.values()}
+
+
+def desktop_icon_theme(home, uid):
+    """[Icons] Theme from the user's kdeglobals (read-only, no symlinks, size-limited), or None."""
+    try:
+        descriptor = os.open(Path(home) / ".config" / "kdeglobals", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_size > 262144:
+            return None
+        text = os.read(descriptor, 262144).decode("utf-8", "replace")
+    finally:
+        os.close(descriptor)
+    group = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            group = line
+        elif group == "[Icons]" and line.startswith("Theme="):
+            theme = line.split("=", 1)[1].strip()
+            return theme if re.fullmatch(r"[A-Za-z0-9_.+-]{1,64}", theme) else None
+    return None
+
+
+def bundled_icon_hash(ident, theme=None):
+    """Hash of a bundled icon for the desktop's theme (falling back to the default theme), or None."""
+    manifest = bundled_icons()
+    hashes = manifest.get("icons", {}).get(ident) or {}
+    return hashes.get("*") or hashes.get(theme or "") or hashes.get(manifest.get("default_theme", "")) or None
+
+
+def chain_icon(pid, uid, root="/proc", depth=32):
+    """Bundled icon id for the process chain above `pid`: an agent anywhere in the chain (e.g. Claude) wins,
+    otherwise the nearest known terminal (Konsole, Kitty). Only the account's own processes count. A display
+    label, never a security decision."""
+    import fnmatch
+    manifest = bundled_icons()
+    programs, patterns, agents = manifest.get("programs", {}), manifest.get("paths", []), set(manifest.get("agents", []))
+    terminal = None
+    for _ in range(depth):
+        if pid <= 1:
+            break
+        try:
+            with open(f"{root}/{pid}/status") as status:
+                fields = dict(line.split(":", 1) for line in status if ":" in line)
+            owner = int(fields["Uid"].split()[0])
+            parent = int(fields["PPid"].split()[0])
+            comm = fields.get("Name", "").strip()
+        except (OSError, ValueError, KeyError, IndexError):
+            break
+        if owner == uid:
+            try:
+                exe = os.readlink(f"{root}/{pid}/exe")
+            except OSError:
+                exe = ""
+            exe = exe.removesuffix(" (deleted)")
+            ident = programs.get(os.path.basename(exe)) or programs.get(comm) \
+                or next((name for pattern, name in patterns if fnmatch.fnmatch(exe, pattern)), None)
+            if ident in agents:
+                return ident
+            if ident and terminal is None:
+                terminal = ident
+        pid = parent
+    return terminal
+
+
+def apply_bundled_icon(context, pid=None, uid=None, home=None, default=None):
+    """Context with a bundled icon named by hash (and no PNG) when one fits, else unchanged.
+
+    Order: the process chain (agent, then terminal); then a PNG whose hash is bundled; then `default`
+    (an icon id, e.g. for sudo or the lock screen). Unknown icons keep travelling as before."""
+    theme = desktop_icon_theme(home, uid) if home and uid is not None else None
+    ident = chain_icon(pid, uid) if pid and uid is not None else None
+    digest = bundled_icon_hash(ident, theme) if ident else None
+    if digest is None and context.get("icon_png_base64"):
+        try:
+            png_hash = digest_of_b64(context["icon_png_base64"])
+        except ValueError:
+            png_hash = None
+        if png_hash in bundled_hashes():
+            digest = png_hash
+    if digest is None and default and not context.get("icon_png_base64"):
+        digest = bundled_icon_hash(default, theme)
+    if digest is None:
+        return context
+    return dict(context, icon_png_base64="", icon_sha256=digest)
+
+
+def digest_of_b64(value):
+    try:
+        return digest(base64.b64decode(value, validate=True))
+    except Exception:
+        raise ValueError("Invalid icon") from None
 
 
 def certificate_fields(root, leaf_der, by_reference):

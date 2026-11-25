@@ -72,8 +72,10 @@ Running Set Up again replaces the key and topics.
   HTTP client runs as your desktop user and only moves ciphertext; the root
   process holds the key and never parses HTTP.
 - **Icons:** over ntfy a request carries only the SHA-256 of the requesting app's
-  icon. Navi shows a cached copy, or its default icon and asks the computer for that
-  one PNG, which is checked against the signed hash before it is shown.
+  icon. Navi shows its built-in copy (Claude, Konsole, Kitty and the common generic
+  icons need no transfer at all) or a cached one; otherwise its default icon, and
+  asks the computer for that one PNG, which is checked against the signed hash
+  before it is shown.
 
 ## Message size
 

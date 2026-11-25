@@ -3,6 +3,7 @@
 #   make
 #   make install DESTDIR=/ [ENABLE_SUDO=yes] [ENABLE_LOGIN=yes] [MAX_COMMAND=10240]
 #   make dictionary   (developers: builds a new committed compression dictionary; never run by install)
+#   make icons        (developers: renders the bundled requester icons in the desktop session; never run by install)
 #
 # MAX_COMMAND is the longest command (in characters) offered for phone approval, 512-16384.
 # Navi must be built with at least the same limit (NAVI_MAX_COMMAND for ./build.sh).
@@ -58,6 +59,9 @@ install: authorize
 	# Committed DEFLATE dictionaries, copied as-is (they are never generated here).
 	$(INSTALL) -d -m 0755 $(DESTDIR)$(LIBEXECDIR)/dictionaries
 	$(INSTALL) -m 0644 dictionaries/DEFAULT dictionaries/navi-deflate-*.dict $(DESTDIR)$(LIBEXECDIR)/dictionaries/
+	# Committed requester icons (by SHA-256) that Navi has built in; copied as-is.
+	$(INSTALL) -d -m 0755 $(DESTDIR)$(LIBEXECDIR)/icons
+	$(INSTALL) -m 0644 icons/manifest.json icons/*.png $(DESTDIR)$(LIBEXECDIR)/icons/
 	$(INSTALL) -m 4755 authorize $(DESTDIR)$(LIBEXECDIR)/authorize
 	# polkit entry point for "Administrator prompts" in System Settings.
 	$(INSTALL) -m 0755 $(POLKIT_SRC)/navi-auth-configure $(DESTDIR)$(LIBEXECDIR)/configure
@@ -101,7 +105,12 @@ endif
 dictionary:
 	$(PYTHON) tools/make_dictionary.py
 
+# Developer command: renders icons/<sha256>.png + icons/manifest.json from icons/sources.json with the
+# session's icon themes. Commit the result; builds and installs only copy committed icons.
+icons:
+	$(PYTHON) tools/make_icons.py
+
 clean:
 	rm -f authorize
 
-.PHONY: all install clean dictionary
+.PHONY: all install clean dictionary icons

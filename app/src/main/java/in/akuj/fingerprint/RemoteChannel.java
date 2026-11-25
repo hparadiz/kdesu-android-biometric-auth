@@ -415,7 +415,7 @@ final class RemoteChannel {
     /** Called after a request arrived over ntfy without its icon: ask the computer for that one icon. */
     static void requestIconIfMissing(Context context, Challenge request) {
         String hash = request.context.optString("icon_sha256");
-        if (hash.isEmpty() || IconCache.get(context, hash) != null) return;
+        if (hash.isEmpty() || BundledIcons.known(context, hash) != null) return; // Built in or cached: nothing to ask.
         try {
             Config config = forMachine(context, request.payload.getString("machine_id"));
             if (config != null) publish(config, new JSONObject().put("name", "icon-request")

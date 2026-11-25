@@ -187,6 +187,9 @@ def main(argv=None):
                        "command_hidden": False, "requesting_user": account.pw_name, "requesting_uid": account.pw_uid,
                        "target_user": target, "source": "sudo", "mode": "approve", "icon_name": "utilities-terminal",
                        "icon_png_base64": "", "tty": os.environ["PAM_TTY"]}
+            # Agent or terminal icon (Claude, Konsole, Kitty) from Navi's built-in set, named by hash.
+            context = rootauth.crypto.apply_bundled_icon(context, pid=sudo_pid, uid=account.pw_uid, home=account.pw_dir,
+                                                         default="utilities-terminal")
             rootauth.audit(f"sudo-start desktop={request} user={account.pw_name} terminal={name} "
                            f"program={program[0] if program else '-'} tty={tty}")
             say(f"Approve this sudo in Navi on your phone… (request {request[:8]}; Ctrl-C to cancel; password after {timeout} s)")

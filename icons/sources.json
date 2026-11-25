@@ -1,0 +1,13 @@
+{
+  "default_theme": "breeze",
+  "icons": [
+    {"id": "claude", "file": "sources/claude.png",
+     "programs": ["claude", "claude-desktop"], "paths": ["*/.local/share/claude/versions/*"], "agent": true},
+    {"id": "konsole", "theme": "utilities-terminal", "programs": ["konsole"]},
+    {"id": "kitty", "theme": "kitty", "programs": ["kitty"]},
+    {"id": "application-x-executable", "theme": "application-x-executable"},
+    {"id": "utilities-terminal", "theme": "utilities-terminal"},
+    {"id": "system-log-out", "theme": "system-log-out"},
+    {"id": "system-lock-screen", "theme": "system-lock-screen"}
+  ]
+}

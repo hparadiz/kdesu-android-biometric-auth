@@ -7,8 +7,8 @@ android {
         applicationId 'in.akuj.fingerprint'
         minSdk 28
         targetSdk 34
-        versionCode 18
-        versionName '0.12.0'
+        versionCode 19
+        versionName '0.13.0'
     }
     buildTypes {
         release { debuggable false }
@@ -40,6 +40,10 @@ tasks.register('naviDictionaries', Copy) {
     from(rootProject.file('dictionaries')) { include 'DEFAULT', 'navi-deflate-*.dict' }
     into naviAssets.map { it.dir('dictionaries') }
 }
+tasks.register('naviIcons', Copy) {
+    from(rootProject.file('icons')) { include '*.png' }
+    into naviAssets.map { it.dir('icons') }
+}
 android.sourceSets.main.java.srcDir naviGenerated
 android.sourceSets.main.assets.srcDir naviAssets
-preBuild.dependsOn 'naviLimits', 'naviDictionaries'
+preBuild.dependsOn 'naviLimits', 'naviDictionaries', 'naviIcons'

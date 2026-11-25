@@ -27,6 +27,14 @@ and revocation as changes to the authorization boundary.
   a build. `tools/make_dictionary.py --check` fails if the sections and the default
   dictionary differ.
 
+- `icons/`: Navi's built-in requester icons (`<sha256>.png`, `manifest.json`), made
+  from `icons/sources.json` by `make icons` (`tools/make_icons.py`, PyQt6). Run it
+  inside the Plasma session: it renders every theme icon once per installed icon
+  theme, exactly as kdesu renders the PNG it sends. Commit the result and copy it
+  to `packaging/repo/sys-auth/navi-auth/files/icons/`. To add an icon, add an entry
+  (a theme icon name, or a file under `icons/sources/` with its attribution) and
+  the program names that should show it.
+
 Root-level host files intentionally match the package copies. Update both when
 making a runtime change; the build workflow checks their equality. Version future
 package changes appropriately instead of silently treating them as the audited

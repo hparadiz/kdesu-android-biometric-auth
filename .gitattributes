@@ -1,1 +1,3 @@
 dictionaries/*.dict -text
+icons/*.png -text
+icons/sources/*.png -text
