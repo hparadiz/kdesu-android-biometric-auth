@@ -58,6 +58,11 @@ public final class MainActivity extends Activity {
     private Attempt active;
     private String seenEnvelope, proofText, openedRequestId, iconPending;
     private boolean stopped = true, resumed, busy, ready;
+    // Command display (display only; the signed command is never changed).
+    private static final int COLLAPSE_CHARS = 512, COLLAPSE_ROWS = 12, PROMPT_CHARS = 200;
+    private String shownCommandId, shownCommand = "";
+    private boolean commandExpanded, commandExact;
+    private Button reject;
     private final Runnable timeout = () -> cancel("Challenge expired", "Start a fresh request on the computer.");
     private final Runnable poll = new Runnable() {
         @Override public void run() {
@@ -94,6 +99,19 @@ public final class MainActivity extends Activity {
         challenge = findViewById(R.id.challenge);
         keyInfo = findViewById(R.id.key_info);
         authenticate = findViewById(R.id.authenticate);
+        reject = findViewById(R.id.reject);
+        reject.setOnClickListener(v -> rejectPending());
+        View.OnClickListener toggleExpanded = v -> {
+            if (!commandCollapsible()) return;
+            commandExpanded = !commandExpanded;
+            renderCommand();
+        };
+        findViewById(R.id.command_text).setOnClickListener(toggleExpanded);
+        findViewById(R.id.command_label).setOnClickListener(toggleExpanded);
+        findViewById(R.id.command_mode).setOnClickListener(v -> {
+            commandExact = !commandExact;
+            renderCommand();
+        });
         enroll = findViewById(R.id.enroll);
         proof = findViewById(R.id.proof);
         deskSettings = getSharedPreferences("desk_reader", MODE_PRIVATE);
@@ -243,6 +261,9 @@ public final class MainActivity extends Activity {
         authenticate.setText(key == null ? "Prepare phone" : resendable(awaiting) ? "Send approval again"
                 : pending != null && pending.kind.equals("enroll") ? "Approve enrollment"
                 : pending != null && pending.remoteSetup() ? "Allow remote approvals" : "Approve request");
+        // Reject is offered whenever a request waits for a decision and no fingerprint prompt is open.
+        reject.setVisibility(key != null && pending != null && active == null ? View.VISIBLE : View.GONE);
+        reject.setEnabled(!busy);
         enroll.setVisibility(availability == BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED ? View.VISIBLE : View.GONE);
         if (pairingConfirm != null) pairingConfirm.setEnabled(key != null && ready && !busy && !pairingBusy && active == null);
         if (!ready) setStatus("Biometrics unavailable", availability == BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED
@@ -320,7 +341,13 @@ public final class MainActivity extends Activity {
                 ((TextView) findViewById(R.id.account_line)).setText(request.context.getString("requesting_user")
                         + " → " + request.context.getString("target_user"));
                 String command = request.context.getString("command");
-                ((TextView) findViewById(R.id.command_text)).setText(command);
+                if (!request.id.equals(shownCommandId)) {
+                    shownCommandId = request.id;
+                    commandExpanded = false;
+                    commandExact = false;
+                }
+                shownCommand = command;
+                renderCommand();
                 findViewById(R.id.command_text).setVisibility(command.isEmpty() ? View.GONE : View.VISIBLE);
                 findViewById(R.id.command_label).setVisibility(command.isEmpty() ? View.GONE : View.VISIBLE);
                 findViewById(R.id.request_context).setVisibility(View.VISIBLE);
@@ -496,6 +523,7 @@ public final class MainActivity extends Activity {
         active = attempt;
         clearProof();
         refresh();
+        handler.removeCallbacks(timeout);
         handler.postDelayed(timeout, Math.max(1, pending.deadline - SystemClock.elapsedRealtime()));
         worker.execute(() -> {
             try {
@@ -525,17 +553,23 @@ public final class MainActivity extends Activity {
                     .setSubtitle(attempt.request.context.optString("application") + " · " + attempt.request.machineName)
                     .setDescription((attempt.request.notificationOnly() ? "Verification preview. Desktop authentication is separate.\n" : "")
                             + attempt.request.operation + "\nAccount: " + attempt.request.context.optString("target_user")
-                            + (attempt.request.context.optString("command").isEmpty() ? "" : "\n" + attempt.request.context.optString("command")))
-                    .setNegativeButton("Cancel", getMainExecutor(), (dialog, which) -> {
-                        declineAttempt(attempt, "Approval canceled", "Start a new request on the computer to try again.");
-                    }).build().authenticate(new BiometricPrompt.CryptoObject(attempt.signature),
+                            + promptCommand(attempt.request.context.optString("command")))
+                    // Leaving the prompt never rejects: it returns to the request, where Reject is explicit.
+                    .setNegativeButton("Back to request", getMainExecutor(), (dialog, which) -> returnToReview(attempt,
+                            "Review the request", "Approve it with your fingerprint, or reject it."))
+                    .build().authenticate(new BiometricPrompt.CryptoObject(attempt.signature),
                     attempt.cancellation, getMainExecutor(), new BiometricPrompt.AuthenticationCallback() {
                         @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) { complete(attempt, result); }
                         @Override public void onAuthenticationFailed() {
                             if (active == attempt) setStatus("Not recognized", "Try your fingerprint again in the Android prompt.");
                         }
                         @Override public void onAuthenticationError(int code, CharSequence message) {
-                            declineAttempt(attempt, "Approval stopped", message.toString());
+                            if (code == BiometricPrompt.BIOMETRIC_ERROR_LOCKOUT || code == BiometricPrompt.BIOMETRIC_ERROR_LOCKOUT_PERMANENT)
+                                returnToReview(attempt, "Too many attempts", message + " Try again later, or reject the request.");
+                            else if (code == BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED || code == BiometricPrompt.BIOMETRIC_ERROR_CANCELED
+                                    || code == BiometricPrompt.BIOMETRIC_ERROR_TIMEOUT)
+                                returnToReview(attempt, "Review the request", "Approve it with your fingerprint, or reject it.");
+                            else returnToReview(attempt, "Fingerprint unavailable", message + " Try again, or reject the request.");
                         }
                     });
         } catch (RuntimeException error) { fail(attempt, error); }
@@ -629,10 +663,117 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void declineAttempt(Attempt attempt, String title, String message) {
+    /** Closes the fingerprint prompt but keeps the request open for review; nothing is sent. */
+    private void returnToReview(Attempt attempt, String title, String message) {
         if (active != attempt) return;
-        cancel(title, message);
-        if (!stopped) deliverApproval(attempt.request, false);
+        active = null;
+        attempt.cancellation.cancel();
+        if (pending == null || pending.expired()) {
+            cancel("Challenge expired", "Start a fresh request on the computer.");
+            return;
+        }
+        refresh();
+        setStatus(title, message);
+    }
+
+    /** The explicit decision to refuse: the computer is told at once and falls back to its password. */
+    private void rejectPending() {
+        if (active != null || pending == null) return;
+        Challenge request = pending;
+        cancel("Request rejected", "The computer was told; it asks for the password instead.");
+        if (!stopped) deliverApproval(request, false);
+    }
+
+    /** The command for the fingerprint prompt: its first line, shortened; the full text is on the request screen. */
+    private static String promptCommand(String command) {
+        if (command.isEmpty()) return "";
+        int newline = command.indexOf('\n');
+        String first = CommandFormatter.formattedTabs(newline < 0 ? command : command.substring(0, newline));
+        boolean shortened = newline >= 0 || first.length() > PROMPT_CHARS;
+        if (first.length() > PROMPT_CHARS) first = first.substring(0, PROMPT_CHARS);
+        return "\n" + first + (shortened ? "… (full command on the request screen)" : "");
+    }
+
+    private boolean commandCollapsible() {
+        java.util.List<CommandFormatter.Row> rows = CommandFormatter.rows(shownCommand);
+        int lines = shownCommand.split("\n", -1).length;
+        return shownCommand.length() > COLLAPSE_CHARS || lines > COLLAPSE_ROWS
+                || !commandExact && rows != null && rows.size() > COLLAPSE_ROWS;
+    }
+
+    /** Formatted (numbered lines, breaks after && || ; |) or exact text, collapsed to 512 characters / 12 rows. */
+    private void renderCommand() {
+        TextView view = findViewById(R.id.command_text);
+        TextView label = findViewById(R.id.command_label);
+        TextView mode = findViewById(R.id.command_mode);
+        String command = shownCommand;
+        java.util.List<CommandFormatter.Row> rows = CommandFormatter.rows(command);
+        boolean formatted = !commandExact && rows != null;
+        boolean collapsible = commandCollapsible();
+        boolean limited = collapsible && !commandExpanded;
+        int dim = getColor(R.color.navi_muted);
+        android.text.SpannableStringBuilder text = new android.text.SpannableStringBuilder();
+        boolean truncated = false;
+        if (formatted) {
+            int lastLine = 0;
+            for (CommandFormatter.Row row : rows) lastLine = Math.max(lastLine, row.number);
+            boolean numbered = lastLine > 1;
+            int width = String.valueOf(lastLine).length();
+            int used = 0, count = 0;
+            for (CommandFormatter.Row row : rows) {
+                if (limited && (count >= COLLAPSE_ROWS || used >= COLLAPSE_CHARS)) { truncated = true; break; }
+                String body = row.text;
+                if (limited && used + body.length() > COLLAPSE_CHARS) { body = body.substring(0, COLLAPSE_CHARS - used); truncated = true; }
+                if (count > 0) text.append('\n');
+                int start = text.length();
+                if (row.number == 0) text.append(numbered ? repeat(' ', width + 1) : "").append("  ").append(CommandFormatter.CONTINUATION);
+                else if (numbered) text.append(String.format(java.util.Locale.ROOT, "%" + width + "d  ", row.number));
+                if (text.length() > start)
+                    text.setSpan(new android.text.style.ForegroundColorSpan(dim), start, text.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                text.append(CommandFormatter.formattedTabs(body));
+                used += row.text.length();
+                count++;
+                if (truncated) break;
+            }
+        } else {
+            String body = command;
+            if (limited) {
+                int cut = Math.min(body.length(), COLLAPSE_CHARS);
+                int newline = -1;
+                for (int i = 0, lines = 0; i < cut; i++) {
+                    if (body.charAt(i) == '\n' && ++lines >= COLLAPSE_ROWS) { newline = i; break; }
+                }
+                if (newline >= 0) cut = newline;
+                truncated = cut < body.length();
+                body = body.substring(0, cut);
+            }
+            for (int i = 0; i < body.length(); i++) {
+                char c = body.charAt(i);
+                if (c == '\t') {
+                    int start = text.length();
+                    text.append(CommandFormatter.TAB_EXACT);
+                    text.setSpan(new android.text.style.ForegroundColorSpan(dim), start, start + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                } else text.append(c);
+            }
+        }
+        if (truncated) {
+            int start = text.length();
+            text.append(" …");
+            text.setSpan(new android.text.style.ForegroundColorSpan(dim), start, text.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        view.setText(text);
+        label.setText(!collapsible ? "Command to authorize" : commandExpanded ? "Command to authorize · tap to collapse"
+                : "Command to authorize · tap to show all " + command.length() + " characters");
+        // Formatting only matters when it changes the layout (several rows or tabs).
+        boolean differs = rows != null && (rows.size() > 1 || command.indexOf('\t') >= 0);
+        mode.setVisibility(differs ? View.VISIBLE : View.GONE);
+        mode.setText(commandExact ? "Formatted" : "Exact");
+    }
+
+    private static String repeat(char c, int count) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < count; i++) out.append(c);
+        return out.toString();
     }
 
     /** Swaps in a requester icon that arrived over ntfy after the request was shown. */
@@ -771,7 +912,8 @@ public final class MainActivity extends Activity {
     @Override protected void onStop() {
         stopped = true;
         handler.removeCallbacks(poll);
-        if (active != null) cancel("Approval canceled", "The app left the foreground. Start a new computer request.");
+        // The request stays open until it expires: reopening Navi shows it again for approval or rejection.
+        if (active != null) returnToReview(active, "Request still open", "Approve it with your fingerprint, or reject it.");
         super.onStop();
     }
 

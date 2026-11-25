@@ -34,6 +34,9 @@ PACKAGE = "in.akuj.fingerprint"
 DOMAIN = "android-linux-fingerprint/v1"
 STATE = Path(__file__).resolve().parent / ".state"
 TTL = 120
+MAX_COMMAND = 10240  # set by make install (MAX_COMMAND=...); Navi's own build limit must be at least this
+MAX_PAYLOAD = 131072  # signed payload; the wire message itself stays within 64 KiB
+MAX_MESSAGE = 65536  # one request/response/receipt file or network message
 
 
 def b64(data):
@@ -46,6 +49,13 @@ def unb64(value):
 
 def encode(value):
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def check_layout_text(value, limit, allow_layout=False):
+    """Printable display text; only a command may also contain newlines and tabs."""
+    return isinstance(value, str) and len(value) <= limit and not any(
+        (ord(c) < 32 and not (allow_layout and c in "\n\t")) or 0x7f <= ord(c) <= 0x9f
+        or 0x202a <= ord(c) <= 0x202e or 0x2066 <= ord(c) <= 0x2069 or 0xd800 <= ord(c) <= 0xdfff for c in value)
 
 
 def spki(key):
@@ -490,17 +500,23 @@ def lan_present(addresses, timeout=2.0, ports=(1716, 39841)):
 
 def envelope(key, payload):
     raw = encode(payload)
+    if len(raw) > MAX_PAYLOAD:
+        raise ValueError(f"Request too large for the phone ({len(raw)} bytes)")
     return {"payload_b64": b64(raw), "signature_b64": b64(key.sign(raw, ec.ECDSA(hashes.SHA256())))}
+
+
+def check_message_size(value, what="Request"):
+    size = len(encode(value))
+    if size > MAX_MESSAGE:
+        raise ValueError(f"{what} too large for the phone ({size} bytes; at most {MAX_MESSAGE})")
 
 
 def validate_context(context):
     for name, limit, empty in (("application", 80, False), ("action_id", 160, False),
-            ("command", 512, True), ("requesting_user", 64, False), ("target_user", 64, False),
+            ("command", MAX_COMMAND, True), ("requesting_user", 64, False), ("target_user", 64, False),
             ("source", 64, False), ("icon_name", 128, True)):
         value = context.get(name, "")
-        if not isinstance(value, str) or (not empty and not value) or len(value) > limit or any(
-                ord(c) < 32 or 0x7f <= ord(c) <= 0x9f or 0x202a <= ord(c) <= 0x202e
-                or 0x2066 <= ord(c) <= 0x2069 for c in value):
+        if not check_layout_text(value, limit, allow_layout=name == "command") or (not empty and not value):
             raise ValueError(f"Invalid {name} display metadata.")
     if type(context.get("requesting_uid")) is not int or context["requesting_uid"] != os.getuid():
         raise ValueError("Requesting UID must match this session.")
@@ -942,6 +958,7 @@ def approve(args, db, machine_key, root):
     request = envelope(machine_key, payload)
     request["machine_certificate_b64"] = b64(root.public_bytes(serialization.Encoding.DER))
     request["phone_certificate_b64"] = b64(leaf_der)
+    check_message_size(request)
     db.execute("INSERT INTO requests VALUES (?, ?, 'pending')", (request_id, encode(payload)))
     db.commit()
     deadline = time.monotonic() + TTL
@@ -1266,10 +1283,9 @@ def main():
         return
     if getattr(args, "operation", "") and (len(args.operation) > 160 or any(ord(c) < 32 for c in args.operation)):
         raise ValueError("Operation must be printable text of at most 160 characters.")
-    for name, limit in (("application", 80), ("action_id", 160), ("requested_command", 512), ("target_user", 64), ("icon_name", 128)):
+    for name, limit in (("application", 80), ("action_id", 160), ("requested_command", MAX_COMMAND), ("target_user", 64), ("icon_name", 128)):
         value = getattr(args, name, "")
-        if len(value) > limit or any(ord(c) < 32 or 0x7f <= ord(c) <= 0x9f or 0x202a <= ord(c) <= 0x202e
-                                     or 0x2066 <= ord(c) <= 0x2069 for c in value):
+        if not check_layout_text(value, limit, allow_layout=name == "requested_command"):
             raise ValueError(f"{name} must be plain display text of at most {limit} characters.")
     if getattr(args, "icon_file", None) is not None:
         icon = args.icon_file.read_bytes()

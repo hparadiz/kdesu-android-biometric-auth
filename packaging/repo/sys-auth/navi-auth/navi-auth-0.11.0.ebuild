@@ -23,23 +23,27 @@ RDEPEND="${PYTHON_DEPS}
     sys-auth/polkit
     dev-qt/qttools:6[qdbus]"
 
+src_unpack() {
+    # The reviewed sources are carried in this repository's files/ directory.
+    cp -r "${FILESDIR}"/. "${S}"/ || die
+}
+
 src_compile() {
-    $(tc-getCC) ${CFLAGS} ${LDFLAGS} -fPIE -pie -Wl,-z,relro,-z,now \
-        -o authorize "${FILESDIR}/authorize.c" || die
+    emake CC="$(tc-getCC)" authorize
 }
 
 src_install() {
-    exeinto /usr/libexec/navi-auth
-    doexe "${FILESDIR}/rootauth.py" "${FILESDIR}/host.py" "${FILESDIR}/configure-authority.py" "${FILESDIR}/kdeconnect_transport.py" "${FILESDIR}/ntfy_transport.py"
-    doexe authorize
-    # polkit entry point for "Administrator prompts" in System Settings.
-    newexe "${FILESDIR}/navi-auth-configure" configure
-    insinto /usr/share/polkit-1/actions
-    doins "${FILESDIR}/in.akuj.navi-auth.policy"
+    # NAVI_AUTH_MAX_COMMAND (e.g. in /etc/portage/env/navi-auth.conf + package.env) sets the longest
+    # command offered for phone approval, 512-16384 characters (default 10240). Navi must be built
+    # with at least the same limit.
+    emake DESTDIR="${D}" POLKIT_SRC=. MAX_COMMAND="${NAVI_AUTH_MAX_COMMAND:-10240}" install
     fperms 4755 /usr/libexec/navi-auth/authorize
 }
 
 pkg_postinst() {
+    elog "Commands up to ${NAVI_AUTH_MAX_COMMAND:-10240} characters are offered for phone approval"
+    elog "(NAVI_AUTH_MAX_COMMAND). Requests carry the command once, so Navi must be"
+    elog "version 0.11.0 or newer."
     # The helper and configurator start /usr/bin/python3 -I; its default must have the modules.
     if ! /usr/bin/python3 -I -c 'import cryptography, dbus, gi' >/dev/null 2>&1; then
         ewarn "The default /usr/bin/python3 ($(/usr/bin/python3 -I -c 'import sys; print(sys.version.split()[0])' 2>/dev/null))"

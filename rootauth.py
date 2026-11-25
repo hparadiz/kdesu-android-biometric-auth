@@ -93,10 +93,9 @@ def private_directory(path, mode):
         raise ValueError(f"Expected root-owned directory with mode {mode:o}: {path}")
 
 
-def plain(value, limit, field, empty=False):
-    if not isinstance(value, str) or len(value) > limit or (not value and not empty) or any(
-            ord(c) < 32 or 0x7f <= ord(c) <= 0x9f or 0x202a <= ord(c) <= 0x202e
-            or 0x2066 <= ord(c) <= 0x2069 or 0xd800 <= ord(c) <= 0xdfff for c in value):
+def plain(value, limit, field, empty=False, allow_layout=False):
+    """Printable text; allow_layout additionally permits newlines and tabs (commands only)."""
+    if not crypto.check_layout_text(value, limit, allow_layout) or (not value and not empty):
         raise ValueError(f"Invalid {field}")
     return value
 
@@ -123,8 +122,8 @@ def validate_start(event, peer_uid, account):
         raise ValueError("Requesting UID does not match the invoking account")
     if supplied.get("requesting_user") != account.pw_name:
         raise ValueError("Requesting account does not match the invoking account")
-    context = {name: plain(supplied.get(name, ""), limit, name, empty)
-               for name, limit, empty in (("application", 80, False), ("command", 512, False),
+    context = {name: plain(supplied.get(name, ""), limit, name, empty, allow_layout=name == "command")
+               for name, limit, empty in (("application", 80, False), ("command", crypto.MAX_COMMAND, False),
                    ("icon_name", 128, True), ("requester_executable", 4096, True))}
     encoded = supplied.get("icon_png_base64", "")
     if not isinstance(encoded, str) or len(encoded) > 21848:
@@ -421,6 +420,7 @@ class PhoneAttempt:
             self.request = crypto.envelope(owner.key, self.payload)
             self.request.update(machine_certificate_b64=crypto.b64(owner.root.public_bytes(crypto.serialization.Encoding.DER)),
                                 phone_certificate_b64=crypto.b64(leaf_der))
+            crypto.check_message_size(self.request)
             with owner.db:
                 owner.db.execute("INSERT INTO requests VALUES(?,?,?,'pending')",
                                  (self.request_id, desktop_id, crypto.encode(self.payload)))
@@ -527,7 +527,8 @@ class Authority:
             cwd_fd = os.open(cwd, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
             cwd = os.readlink(f"/proc/self/fd/{cwd_fd}")
             cwd_info = os.fstat(cwd_fd)
-            execution = {"argv": ["/bin/sh", "-c", context["command"]], "uid": 0, "gid": 0,
+            # The signed context.command is the one copy of the command: it is shown and it is what runs.
+            execution = {"shell": "/bin/sh -c", "uid": 0, "gid": 0,
                          "cwd": cwd, "cwd_device": cwd_info.st_dev, "cwd_inode": cwd_info.st_ino, "environment": environment}
             pending = {}
             for attempt in self.attempts:
