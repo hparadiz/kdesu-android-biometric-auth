@@ -28,6 +28,7 @@ public:
         RemoteRole,
         RemotePhoneUrlRole,
         RemoteComputerUrlRole,
+        RemoteAdminRole,
     };
     Q_ENUM(Roles)
 
@@ -48,6 +49,14 @@ public:
         /** Web addresses of the phone's and the computer's ntfy inbox topics (encrypted traffic). */
         QString remotePhoneUrl;
         QString remoteComputerUrl;
+        /** Short ID of this account's remote approval setup (empty if none). */
+        QString remoteId;
+        /**
+         * Whether administrator prompts use the same remote approvals: "" (not applicable or neither has them),
+         * "same", "stale" (the root copy still has remote approvals this account turned off) or
+         * "outdated" (the root copy lacks this account's current remote approvals).
+         */
+        QString remoteAdmin;
     };
 
     using QAbstractListModel::QAbstractListModel;

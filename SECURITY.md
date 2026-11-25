@@ -100,16 +100,30 @@ boundary preventing direct helper invocation.
   drop messages (availability, not authorization). The optional ntfy access token
   is sent to Navi inside the signed setup request over KDE Connect. See
   [Remote approvals](docs/REMOTE.md).
-- **Optional sudo approval:** built only with `USE=sudo` / `ENABLE_SUDO=yes` and
-  active only after an administrator adds a `pam_exec` line to `/etc/pam.d/sudo`.
-  The helper runs as root inside sudo and offers the phone only for
-  `PAM_SERVICE=sudo` on a pseudo-terminal whose process ancestry contains Konsole
-  or Kitty owned by the user and no `sshd`. That check limits *where* the phone is
-  offered; it is not a boundary against code already running as the user, who
-  could open such a terminal. The fingerprint approval is the gate, and any
-  failure falls back to the password. The command shown on the phone is sudo's
-  own argument list, a display hint: sudo still applies sudoers, aliases and
-  `-s`/`-i` semantics. Approval is recorded without execution (no execution PID).
+- **Optional sudo, login and lock-screen approval:** built only with
+  `USE=sudo` / `USE=login` (`ENABLE_SUDO` / `ENABLE_LOGIN`) and active only after
+  an administrator switches each on (`navi-pam`, polkit `auth_admin`), which adds
+  one `pam_exec` line to `/etc/pam.d/sudo`, `sddm` or `kde`.
+  - sudo: the helper runs as root inside sudo and offers the phone only for
+    `PAM_SERVICE=sudo` on a pseudo-terminal whose process ancestry contains Konsole
+    or Kitty owned by the user and no `sshd`. The command shown is sudo's own
+    argument list, a display hint: sudo still applies sudoers, aliases and `-s`/`-i`.
+  - SDDM: offered only for `PAM_SERVICE=sddm` from root-owned `sddm-helper`
+    started by `sddm`, and only when the password field is empty; a typed password
+    goes straight to the normal check.
+  - Lock screen: kscreenlocker authenticates without privileges (in Plasma 6.8 in
+    `kscreenlocker_worker`, started by `kscreenlocker_greet`), so the helper
+    asks the root authority through the setuid helper. The lock screen is
+    non-dumpable, so the authority, not the unprivileged helper, verifies as root
+    that the request comes from that user's worker/greeter chain; it builds the
+    unlock request itself and only answers whether the phone approved. That answer grants
+    the caller nothing it could not already do; the event exists only when built in.
+  - These checks limit *where* the phone is offered; they are not a boundary
+    against code already running as the user. Anyone at the keyboard can trigger a
+    request; the fingerprint approval is the gate, and every failure falls back to
+    the password. The `sufficient` line sits before the password rules, so
+    `pam_faillock`'s auth-time lockout does not apply to phone approvals (account
+    checks such as `pam_nologin` still do). Approval is recorded without execution.
 - **Biometric modality:** Android selects strength, not exclusively fingerprint.
   Locally observed hardware enforcement is not independently verified attestation.
 - **Availability:** the LAN service adds network-facing code. Frames, workers and

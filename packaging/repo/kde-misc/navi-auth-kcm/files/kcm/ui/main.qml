@@ -11,6 +11,12 @@ KCM.ScrollViewKCM {
     implicitWidth: Kirigami.Units.gridUnit * 36
     implicitHeight: Kirigami.Units.gridUnit * 28
 
+    function pamLabel(service) {
+        return service === "sudo" ? i18n("sudo in local Konsole and Kitty terminals")
+             : service === "sddm" ? i18n("SDDM login screen (Enter with an empty password)")
+             : i18n("Plasma lock screen (Enter with an empty password)")
+    }
+
     function fingerprint(id) {
         return id.length >= 12 ? id.substring(0, 4) + " " + id.substring(4, 8) + " " + id.substring(8, 12) : id
     }
@@ -83,49 +89,63 @@ KCM.ScrollViewKCM {
             type: Kirigami.MessageType.Information
             text: i18n("Administrator prompt status is unavailable: %1", kcm.authorityProblem)
         }
-        Kirigami.InlineMessage {
-            Layout.fillWidth: true
-            visible: kcm.sudoApproval === "misplaced" || kcm.sudoApproval === "outdated" || kcm.sudoApprovalLost
-            type: Kirigami.MessageType.Warning
-            text: kcm.sudoApprovalLost
-                ? i18n("Phone approval for sudo was turned off outside System Settings, probably by a sudo update that replaced /etc/pam.d/sudo. Turn it on again to restore it.")
-                : i18n("The phone approval line in /etc/pam.d/sudo needs repair (it is below the password rule or not the expected line), so sudo may ask for the password first.")
-            actions: Kirigami.Action {
-                text: i18nc("@action:button", "Repair")
-                icon.name: "tools-wizard"
-                enabled: !kcm.busy && kcm.canChangeSudoApproval
-                onTriggered: kcm.setSudoApproval(true)
-            }
-        }
-        RowLayout {
-            Layout.fillWidth: true
-            // Present only when navi-auth was built with sudo approval (USE=sudo / ENABLE_SUDO=yes).
-            visible: kcm.sudoApproval.length > 0
-            spacing: Kirigami.Units.smallSpacing
-            QQC2.Switch {
-                id: sudoSwitch
-                text: i18nc("@option:check", "Approve sudo from the phone in local Konsole and Kitty terminals")
-                checked: kcm.sudoApproval === "enabled"
-                enabled: !kcm.busy && kcm.canChangeSudoApproval && kcm.sudoApproval !== "unrecognized"
-                         && (checked || kcm.authorityConfigured)
-                onToggled: {
-                    const wanted = checked
-                    checked = Qt.binding(() => kcm.sudoApproval === "enabled") // reflect the real file, not the click
-                    kcm.setSudoApproval(wanted)
+        // Optional phone approvals for PAM services (sudo, SDDM login, lock screen), present only when built in.
+        Repeater {
+            model: ["sudo", "sddm", "kde"].filter(service => kcm.pamApproval[service] !== undefined)
+            delegate: ColumnLayout {
+                id: pamRow
+                required property string modelData
+                readonly property string service: modelData
+                readonly property string state: kcm.pamApproval[service] ?? ""
+                readonly property bool lost: kcm.pamApprovalLost.indexOf(service) >= 0
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+                Kirigami.InlineMessage {
+                    Layout.fillWidth: true
+                    visible: pamRow.state === "misplaced" || pamRow.state === "outdated" || pamRow.lost
+                    type: Kirigami.MessageType.Warning
+                    text: pamRow.lost
+                        ? i18n("Phone approval for %1 was turned off outside System Settings, probably by a package update that replaced /etc/pam.d/%2. Turn it on again to restore it.", root.pamLabel(pamRow.service), pamRow.service)
+                        : i18n("The phone approval line in /etc/pam.d/%1 needs repair (it is below the password rule or not the expected line).", pamRow.service)
+                    actions: Kirigami.Action {
+                        text: i18nc("@action:button", "Repair")
+                        icon.name: "tools-wizard"
+                        enabled: !kcm.busy && kcm.canChangePamApproval
+                        onTriggered: kcm.setPamApproval(pamRow.service, true)
+                    }
                 }
-                QQC2.ToolTip.text: !kcm.authorityConfigured && !checked
-                    ? i18n("Turn on Administrator prompts for a phone first; sudo uses the same protected phone approval.")
-                    : i18n("Adds one line to /etc/pam.d/sudo (administrator password required). sudo then asks the phone first; declining, a timeout or Ctrl-C falls back to your password. SSH sessions, other terminals, su, pkexec and other system prompts are not affected.")
-                QQC2.ToolTip.visible: hovered
-                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Kirigami.Units.smallSpacing
+                    QQC2.Switch {
+                        text: i18nc("@option:check", "Approve from the phone: %1", root.pamLabel(pamRow.service))
+                        checked: pamRow.state === "enabled"
+                        enabled: !kcm.busy && kcm.canChangePamApproval && pamRow.state !== "unrecognized"
+                                 && (checked || kcm.authorityConfigured)
+                        onToggled: {
+                            const wanted = checked
+                            checked = Qt.binding(() => pamRow.state === "enabled") // reflect the real file, not the click
+                            kcm.setPamApproval(pamRow.service, wanted)
+                        }
+                        QQC2.ToolTip.text: !kcm.authorityConfigured && !checked
+                            ? i18n("Turn on Administrator prompts for a phone first; this uses the same protected phone approval.")
+                            : pamRow.service === "sudo"
+                            ? i18n("Adds one line to /etc/pam.d/sudo (administrator password required). sudo then asks the phone first; declining, a timeout or Ctrl-C falls back to your password. SSH sessions, other terminals, su, pkexec and other system prompts are not affected.")
+                            : pamRow.service === "sddm"
+                            ? i18n("Adds one line to /etc/pam.d/sddm (administrator password required). At the login screen, press Enter with an empty password to approve on the phone; typing the password works as before. KDE Connect is not running before you log in, so this needs Remote Approvals (ntfy) for the phone. KWallet will not open automatically after a phone login.")
+                            : i18n("Adds one line to /etc/pam.d/kde (administrator password required). On the lock screen, press Enter with an empty password to approve on the phone; typing the password works as before. Console logins, SSH and su keep using passwords.")
+                        QQC2.ToolTip.visible: hovered
+                        QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    }
+                    QQC2.BusyIndicator {
+                        visible: kcm.busy && (kcm.task === "pam-enable" || kcm.task === "pam-disable")
+                        running: visible
+                        Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                        Layout.preferredWidth: Layout.preferredHeight
+                    }
+                    Item { Layout.fillWidth: true }
+                }
             }
-            QQC2.BusyIndicator {
-                visible: kcm.busy && (kcm.task === "sudo-enable" || kcm.task === "sudo-disable")
-                running: visible
-                Layout.preferredHeight: Kirigami.Units.iconSizes.small
-                Layout.preferredWidth: Layout.preferredHeight
-            }
-            Item { Layout.fillWidth: true }
         }
         QQC2.Label {
             Layout.fillWidth: true
@@ -168,6 +188,7 @@ KCM.ScrollViewKCM {
             required property string remote
             required property string remotePhoneUrl
             required property string remoteComputerUrl
+            required property string remoteAdmin
             readonly property string remoteHost: remote.replace(/^https?:\/\//, "").replace(/\/$/, "")
 
             width: ListView.view.width
@@ -230,6 +251,38 @@ KCM.ScrollViewKCM {
                         opacity: 0.7
                         font: Kirigami.Theme.smallFont
                     }
+                    // The protected copy used by administrator prompts no longer matches this account's remote approvals.
+                    RowLayout {
+                        visible: card.enrolled && (card.remoteAdmin === "stale" || card.remoteAdmin === "outdated")
+                        spacing: Kirigami.Units.smallSpacing
+                        Kirigami.Icon {
+                            source: "data-warning"
+                            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                        }
+                        QQC2.Label {
+                            Layout.fillWidth: true
+                            text: card.remoteAdmin === "stale"
+                                ? i18n("Administrator prompts still use remote approvals that were turned off")
+                                : i18n("Administrator prompts don't have the current remote approval settings")
+                            wrapMode: Text.WordWrap
+                            font: Kirigami.Theme.smallFont
+                            color: Kirigami.Theme.neutralTextColor
+                        }
+                        QQC2.Button {
+                            text: card.remoteAdmin === "stale" ? i18nc("@action:button", "Turn Off")
+                                                              : i18nc("@action:button", "Update")
+                            font: Kirigami.Theme.smallFont
+                            enabled: !kcm.busy && (card.remoteAdmin === "stale" || kcm.canEnableAdministratorPrompts)
+                            onClicked: card.remoteAdmin === "stale" ? kcm.removeRemote(card.deviceId)
+                                                                    : kcm.enableAdministratorPrompts(card.deviceId)
+                            QQC2.ToolTip.text: card.remoteAdmin === "stale"
+                                ? i18n("Removes the old remote approval settings from administrator prompts. No password needed.")
+                                : i18n("Copies this phone's current remote approval settings to administrator prompts. Asks for the administrator password.")
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+                    }
                     RowLayout {
                         visible: card.enrolled && kcm.authorityAvailable && kcm.authorityProblem.length === 0
                         spacing: Kirigami.Units.smallSpacing
@@ -286,11 +339,17 @@ KCM.ScrollViewKCM {
                     // With remote approvals a phone KDE Connect can't see is still reachable over ntfy.
                     enabled: !kcm.busy && (card.usable || card.remote.length > 0)
                     onClicked: testMenu.popup(this, 0, height)
-                    QQC2.ToolTip.text: i18n("Ask the phone for a fingerprint approval without running anything. Choose how the request travels: as signed files through KDE Connect (or over ntfy when remote approvals are on and KDE Connect can't see the phone), over Navi's direct network connection (needs Enable network authentication in Navi → ☰ → Settings), or over ntfy only.")
+                    QQC2.ToolTip.text: i18n("Ask the phone for a fingerprint approval without running anything. Automatic uses the same order as administrator prompts, sudo and the lock screen: Navi's direct local-network connection (found through KDE Connect, port 39841), then KDE Connect messages, then ntfy when KDE Connect can't reach the phone. The other entries test one route each.")
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                     QQC2.Menu {
                         id: testMenu
+                        QQC2.MenuItem {
+                            text: i18nc("@action:inmenu", "Automatic (like administrator prompts)")
+                            icon.name: "fingerprint"
+                            onTriggered: kcm.sendTest(card.deviceId, "auto")
+                        }
+                        QQC2.MenuSeparator {}
                         QQC2.MenuItem {
                             text: i18nc("@action:inmenu", "Through KDE Connect messages")
                             icon.name: "kdeconnect"

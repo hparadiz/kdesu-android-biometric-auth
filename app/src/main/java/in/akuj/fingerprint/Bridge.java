@@ -23,6 +23,7 @@ final class Bridge {
 
     Bridge(Context context) {
         directory = context.getFilesDir();
+        Payloads.load(context);
         developmentEnrollment = (context.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
     }
 
@@ -51,8 +52,40 @@ final class Bridge {
         return validate(envelope, key, false);
     }
 
+    /**
+     * The certificates a request names. Paired requests carry only their SHA-256 and are resolved from the
+     * stored pairing (never from the request); enrollment carries them in full.
+     */
+    private X509Certificate[] requestCertificates(JSONObject envelope) throws Exception {
+        boolean full = envelope.has("machine_certificate_b64") || envelope.has("phone_certificate_b64");
+        boolean byHash = envelope.has("machine_certificate_sha256") || envelope.has("phone_certificate_sha256");
+        if (full == byHash) throw new IllegalArgumentException("Invalid request certificates.");
+        if (full) return new X509Certificate[]{certificate(envelope.getString("machine_certificate_b64")),
+                certificate(envelope.getString("phone_certificate_b64"))};
+        String machineId = new JSONObject(Payloads.utf8(Payloads.bytes(envelope))).getString("machine_id");
+        JSONObject pairing = pairings().optJSONObject(machineId);
+        if (pairing == null) throw new IllegalArgumentException("Unknown computer. Requests require an enrolled computer key.");
+        if (!matchesStored(pairing.getString("machine_certificate_b64"), envelope.getString("machine_certificate_sha256"))
+                || !matchesStored(pairing.getString("phone_certificate_b64"), envelope.getString("phone_certificate_sha256")))
+            throw new IllegalArgumentException("Computer request does not match the stored pairing.");
+        return new X509Certificate[]{certificate(pairing.getString("machine_certificate_b64")),
+                certificate(pairing.getString("phone_certificate_b64"))};
+    }
+
+    /** True when the stored base64 DER certificate has exactly this SHA-256 (lowercase hex). */
+    static boolean matchesStored(String storedDerBase64, String sha256) throws Exception {
+        return sha256.matches("[0-9a-f]{64}") && MessageDigest.isEqual(
+                hash(decode(storedDerBase64)).getBytes(StandardCharsets.US_ASCII), sha256.getBytes(StandardCharsets.US_ASCII));
+    }
+
+    /** The phone certificate a request used, encoded for comparison with the stored pairing. */
+    static String phoneCertificateB64(Challenge request) throws Exception {
+        return encode(request.phoneCertificate.getEncoded());
+    }
+
     Challenge validate(JSONObject envelope, SigningKey key, boolean allowExpired) throws Exception {
-        X509Certificate machine = certificate(envelope.getString("machine_certificate_b64"));
+        X509Certificate[] certificates = requestCertificates(envelope);
+        X509Certificate machine = certificates[0];
         String machineId = hash(machine.getPublicKey().getEncoded());
         JSONObject pairing = pairings().optJSONObject(machineId);
         // Release entry points never bootstrap trust from a request's own certificate. The only
@@ -61,7 +94,7 @@ final class Bridge {
         boolean bootstrap = developmentEnrollment || pinnedPairing != null && machineId.equals(pinnedPairing.getString("machine_id"));
         if (pairing == null && !bootstrap)
             throw new IllegalArgumentException("Unknown computer. Requests require an enrolled computer key.");
-        X509Certificate phone = certificate(envelope.getString("phone_certificate_b64"));
+        X509Certificate phone = certificates[1];
         validateCertificate(machine, machine, true);
         validateCertificate(phone, machine, false);
         verifyEnvelope(envelope, machine);
@@ -69,7 +102,7 @@ final class Bridge {
         // A completed enrollment stays valid for its receipt/cancel: the stored pairing already
         // holds exactly this certificate, so re-reading it grants nothing new.
         boolean completed = pairing != null && pairing.optString("phone_certificate_b64")
-                .equals(envelope.getString("phone_certificate_b64"));
+                .equals(encode(phone.getEncoded()));
         if (request.kind.equals("enroll") && !bootstrap && !completed)
             throw new IllegalArgumentException("Computer enrollment requires the pairing code shown on the computer.");
         if (request.kind.equals("enroll") && !completed && pinnedPairing != null && !developmentEnrollment
@@ -89,7 +122,7 @@ final class Bridge {
             if (!Arrays.equals(pinned.getPublicKey().getEncoded(), machine.getPublicKey().getEncoded()))
                 throw new IllegalArgumentException("Computer identity does not match the stored pairing.");
             if ((request.kind.equals("authenticate") || request.kind.equals("remote-setup")) && !pairing.getString("phone_certificate_b64")
-                    .equals(envelope.getString("phone_certificate_b64"))) {
+                    .equals(encode(phone.getEncoded()))) {
                 throw new IllegalArgumentException("The phone certificate differs from the approved pairing.");
             }
         }
@@ -101,14 +134,18 @@ final class Bridge {
             JSONObject paired = pairings();
             paired.put(request.payload.getString("machine_id"), new JSONObject()
                     .put("machine_name", request.machineName)
-                    .put("machine_certificate_b64", request.envelope.getString("machine_certificate_b64"))
-                    .put("phone_certificate_b64", request.envelope.getString("phone_certificate_b64")));
+                    .put("machine_certificate_b64", encode(request.machineCertificate.getEncoded()))
+                    .put("phone_certificate_b64", phoneCertificateB64(request)));
             write("pairings.json", paired);
             PairingCode.clear(this); // The pinned bootstrap is single-use.
         }
-        JSONObject response = new JSONObject().put("request_id", request.id).put("status", "signed")
-                .put("payload_b64", encode(request.bytes)).put("signature_b64", encode(signature))
-                .put("phone_certificate_b64", request.envelope.getString("phone_certificate_b64"));
+        // Echo the payload exactly as the computer sent it (same compression and dictionary).
+        JSONObject response = Payloads.copyPayload(request.envelope, new JSONObject().put("request_id", request.id).put("status", "signed"))
+                .put("signature_b64", encode(signature));
+        // Name the phone certificate the same way the request did (by hash once paired).
+        if (request.envelope.has("phone_certificate_sha256"))
+            response.put("phone_certificate_sha256", request.envelope.getString("phone_certificate_sha256"));
+        else response.put("phone_certificate_b64", phoneCertificateB64(request));
         write("response.json", response);
         return response;
     }
@@ -124,7 +161,7 @@ final class Bridge {
 
     boolean canceled(Challenge request, JSONObject envelope) throws Exception {
         if (envelope == null) return false;
-        JSONObject value = new JSONObject(new String(decode(envelope.getString("payload_b64")), StandardCharsets.UTF_8));
+        JSONObject value = new JSONObject(Payloads.utf8(Payloads.bytes(envelope)));
         if (!request.id.equals(value.optString("request_id"))) return false;
         verifyEnvelope(envelope, request.machineCertificate);
         if (!Challenge.DOMAIN.equals(value.getString("domain")) || !"cancel".equals(value.getString("kind"))
@@ -141,7 +178,7 @@ final class Bridge {
 
     boolean receipt(Challenge request, JSONObject response, JSONObject envelope) throws Exception {
         if (envelope == null) return false;
-        JSONObject value = new JSONObject(new String(decode(envelope.getString("payload_b64")), StandardCharsets.UTF_8));
+        JSONObject value = new JSONObject(Payloads.utf8(Payloads.bytes(envelope)));
         if (!request.id.equals(value.getString("request_id"))) return false;
         verifyEnvelope(envelope, request.machineCertificate);
         if (!Challenge.DOMAIN.equals(value.getString("domain")) || !"receipt".equals(value.getString("kind"))
@@ -202,7 +239,7 @@ final class Bridge {
     static void verifyEnvelope(JSONObject envelope, X509Certificate certificate) throws Exception {
         Signature verifier = Signature.getInstance(SigningKey.ALGORITHM);
         verifier.initVerify(certificate.getPublicKey());
-        verifier.update(decode(envelope.getString("payload_b64")));
+        verifier.update(Payloads.bytes(envelope));
         if (!verifier.verify(decode(envelope.getString("signature_b64")))) {
             throw new IllegalArgumentException("Computer signature is invalid.");
         }

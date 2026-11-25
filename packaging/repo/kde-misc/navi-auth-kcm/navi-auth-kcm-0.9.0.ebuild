@@ -32,7 +32,7 @@ src_configure() {
         -DNAVI_AUTH_CONFIGURE=/usr/libexec/navi-auth/configure-authority.py
         -DNAVI_AUTH_PYTHON=/usr/bin/python3
         -DNAVI_AUTH_POLKIT_CONFIGURE=/usr/libexec/navi-auth/configure
-        -DNAVI_AUTH_SUDO_PAM=/usr/libexec/navi-auth/sudo-pam
+        -DNAVI_AUTH_PAM_SWITCH=/usr/libexec/navi-auth/navi-pam
     )
     cmake_src_configure
 }

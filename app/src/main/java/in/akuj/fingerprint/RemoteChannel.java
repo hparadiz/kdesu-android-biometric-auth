@@ -36,7 +36,7 @@ import javax.crypto.spec.SecretKeySpec;
 import javax.net.ssl.HttpsURLConnection;
 
 /**
- * Remote approvals over an ntfy server (navi-remote/v1), used by the computer only when KDE Connect
+ * Remote approvals over an ntfy server (navi-remote/v2), used by the computer only when KDE Connect
  * cannot see this phone. Navi subscribes to its inbox topic(s) itself and publishes replies to the
  * computer's inbox. Topics and the message key come from the fingerprint-approved ECDH setup and are
  * never transmitted. Every message is DEFLATE-compressed, then AES-256-GCM encrypted and bound to its
@@ -44,9 +44,11 @@ import javax.net.ssl.HttpsURLConnection;
  * Bridge.validate (machine signature, pairing, expiry) exactly like the other routes.
  */
 final class RemoteChannel {
-    static final String PROTOCOL = "navi-remote/v1";
+    // v2 requests carry the standard signed envelope. The name is part of each message's AES-GCM associated
+    // data, so v1 and v2 peers cannot read each other. Key and topic derivation keep their fixed v1 labels.
+    static final String PROTOCOL = "navi-remote/v2";
     static final String TO_PHONE = "to-phone", TO_COMPUTER = "to-computer";
-    static final int INLINE_LIMIT = 3800, MAX_PLAIN = 65536, MAX_BLOB = 98304, MAX_LINE = 262144;
+    static final int INLINE_LIMIT = 3800, MAX_PLAIN = 131072, MAX_BLOB = 98304, MAX_LINE = 262144;
     static final Pattern TOPIC = Pattern.compile("navi-[a-z2-7]{26}");
     static final Pattern TOKEN = Pattern.compile("[A-Za-z0-9_.-]{1,128}");
     private static final String FILE = "remote.json";
@@ -398,16 +400,12 @@ final class RemoteChannel {
         JSONObject mail = new JSONObject().put("domain", Challenge.DOMAIN).put("kind", "kdeconnect-mail")
                 .put("name", name).put("request_id", id);
         if ("request.json".equals(name)) {
-            JSONObject compact = message.getJSONObject("value");
-            mail.put("value", new JSONObject()
-                    .put("payload_b64", Bridge.encode(compact.getString("payload_json").getBytes(StandardCharsets.UTF_8)))
-                    .put("signature_b64", compact.getString("signature_b64"))
-                    .put("machine_certificate_b64", compact.getString("machine_certificate_b64"))
-                    .put("phone_certificate_b64", compact.getString("phone_certificate_b64")));
+            // The same signed envelope as on KDE Connect and the direct network route.
+            mail.put("value", message.getJSONObject("value"));
         } else if ("receipt.json".equals(name) || "cancel.json".equals(name)) {
             // Sent by reference: attach the request Navi already holds, if it is the one meant.
             JSONObject current = new Bridge(context).read("request.json");
-            if (current == null || !Bridge.hash(Bridge.decode(current.getString("payload_b64"))).equals(message.getString("request_sha256")))
+            if (current == null || !Bridge.hash(Payloads.bytes(current)).equals(message.getString("request_sha256")))
                 throw new IllegalArgumentException("Remote confirmation does not match the current request.");
             mail.put("value", message.getJSONObject("value")).put("request", current);
         } else throw new IllegalArgumentException("Unknown remote message.");

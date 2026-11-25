@@ -1,0 +1,19 @@
+<!-- BEGIN SYSTEM LOCAL ELEVATION -->
+## Local privilege elevation
+
+For authorized local root operations on this box, use sudo with Navi phone approval:
+`SUDO_ASKPASS=/bin/false script -q -E never -ec "sudo -A <exact command>" /dev/null < /dev/null`.
+This is the explicit default across agentic development. The user approves each
+command on the phone with a fingerprint. Do not use kdesu, pkexec, su, doas, or
+other sudo forms as an automatic fallback. Keep ordinary development unprivileged
+and preserve all tool sandbox and approval requirements; sandbox escalation alone
+does not grant root. sudo returns the command's real exit status; a refused
+approval prints "Not approved on the phone (rejected | timed out | phone
+unreachable | busy)" with the request's own ID, and runs nothing. Retry a timeout
+(never a rejection) up to three times, then stop and ask the user to say when they
+are ready before resending. If the phone is unreachable, run the command once with
+`SUDO_ASKPASS=/usr/bin/ksshaskpass sudo -A <exact command> < /dev/null` (password
+dialog, no phone). Before the first
+privileged action, read `ELEVATION.md` for command limits, output handling and
+failure handling. Carry this rule into delegated work and resume after compaction.
+<!-- END SYSTEM LOCAL ELEVATION -->

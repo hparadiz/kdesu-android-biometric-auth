@@ -16,6 +16,17 @@ and revocation as changes to the authorization boundary.
   the existing dialog/client test suites and preview fixture.
 - `docs/`: setup, protocol, operation, audit and verification.
 
+- `dictionaries/`: committed DEFLATE preset dictionaries (`navi-deflate-N.dict`),
+  `DEFAULT` (the one used for compression) and the editable source
+  `navi-deflate.sections`.
+- `tools/make_dictionary.py`: run as `make dictionary` after editing the sections.
+  It writes the next `navi-deflate-N.dict`, points `DEFAULT` at it, prints a
+  before/after benchmark and never overwrites a published dictionary. Commit both
+  files and copy them to `packaging/repo/sys-auth/navi-auth/files/dictionaries/`.
+  Builds and installs only copy committed dictionaries; never regenerate one during
+  a build. `tools/make_dictionary.py --check` fails if the sections and the default
+  dictionary differ.
+
 Root-level host files intentionally match the package copies. Update both when
 making a runtime change; the build workflow checks their equality. Version future
 package changes appropriately instead of silently treating them as the audited

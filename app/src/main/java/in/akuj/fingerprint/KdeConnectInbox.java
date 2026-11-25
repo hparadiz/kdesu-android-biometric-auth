@@ -284,7 +284,7 @@ final class KdeConnectInbox {
                 }
                 bridge.write("kde-cancellations.json", tombstones);
                 JSONObject current = bridge.read("request.json");
-                if (current != null && Arrays.equals(Bridge.decode(current.getString("payload_b64")), request.bytes)) {
+                if (current != null && Arrays.equals(Payloads.bytes(current), request.bytes)) {
                     bridge.write(name, value);
                     RequestReceiver.refreshNotification(context, id, true);
                 }
@@ -317,7 +317,7 @@ final class KdeConnectInbox {
             } else {
                 JSONObject current = bridge.read("request.json");
                 JSONObject response = bridge.read("response.json");
-                if (current == null || !Arrays.equals(Bridge.decode(current.getString("payload_b64")), request.bytes)
+                if (current == null || !Arrays.equals(Payloads.bytes(current), request.bytes)
                         || response == null || !id.equals(response.optString("request_id")) || !bridge.receipt(request, response, value))
                     throw new IllegalArgumentException("Confirmation does not match the current approval.");
                 bridge.write(name, value);

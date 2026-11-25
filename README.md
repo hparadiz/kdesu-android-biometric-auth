@@ -28,7 +28,7 @@ part of the security boundary.
 | Component | Version / purpose |
 | --- | --- |
 | Android application | 0.10.0, API 28+, desk reader mode, code enrollment (KDE Connect, guided destination setup, Downloads on Android 9–10), Settings and Paired computers screens, remote approvals over ntfy, non-debuggable release |
-| Host CLI and native/Python authority | 0.10.0 with optional sudo approval (local Konsole/Kitty, build-time opt-in),  code enrollment over KDE Connect, device selection by name, remote approvals over ntfy when KDE Connect can't see the phone, and a warning when kdesu is not Navi-enabled |
+| Host CLI and native/Python authority | 0.10.0 with optional sudo, SDDM login and lock-screen approval (build-time opt-in),  code enrollment over KDE Connect, device selection by name, remote approvals over ntfy when KDE Connect can't see the phone, and a warning when kdesu is not Navi-enabled |
 | System Settings page | `kcm_navi_auth` 0.9.0: enroll, status, remote approvals and test (KDE Connect messages, direct network or ntfy) per KDE Connect device |
 | KDE patch and Gentoo packages | kdesu-gui 6.8.2-r1 against kde-cli-tools 6.8.2 (6.7.2-r3 for Plasma 6.7.2) |
 | Direct Wi-Fi transport | Pinned TLS 1.3; restricted TLS 1.2 on Android 9; TCP 39841 |
@@ -53,11 +53,11 @@ verified on a physical phone.**
 The new dedicated KDE Connect plugin was a separate unfinished experiment. It is
 not needed for this release and is not included as a working feature. Bluetooth
 delivery, login, screen unlock and general PAM/PolicyKit integration are not
-implemented. An optional, build-time-enabled helper (`USE=sudo` /
-`make install ENABLE_SUDO=yes`) lets the phone approve `sudo` in local Konsole and
-Kitty terminals once you add one PAM line; see
-[INSTALL](docs/INSTALL.md#8-approving-sudo-from-the-phone-optional). It is new and
-not yet verified on hardware. Nothing else is rerouted.
+implemented. Optional, build-time-enabled helpers (`USE=sudo`,
+`USE=login`) let the phone approve `sudo` in local Konsole and Kitty terminals,
+the SDDM login screen and the Plasma lock screen, each switched on in System
+Settings; see [INSTALL](docs/INSTALL.md#8-phone-approval-for-sudo-login-and-the-lock-screen-optional).
+They are new and not yet verified on hardware. Nothing else is rerouted.
 
 ## Desk reader mode and multiple phones
 

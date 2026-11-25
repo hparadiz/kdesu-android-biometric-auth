@@ -22,6 +22,7 @@ import time
 import uuid
 import ssl
 import threading
+import zlib
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -34,6 +35,11 @@ PACKAGE = "in.akuj.fingerprint"
 DOMAIN = "android-linux-fingerprint/v1"
 STATE = Path(__file__).resolve().parent / ".state"
 TTL = 120
+MAX_COMMAND = 10240  # set by make install (MAX_COMMAND=...); Navi's own build limit must be at least this
+MAX_PAYLOAD = 131072  # signed payload after decompression; the wire message itself stays within 64 KiB
+MAX_MESSAGE = 65536  # one request/response/receipt file or network message
+COMPRESS_MIN = 250  # smaller payloads are always sent plain
+DICTIONARIES = Path(__file__).with_name("dictionaries")
 
 
 def b64(data):
@@ -45,7 +51,85 @@ def unb64(value):
 
 
 def encode(value):
-    return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    """Canonical signed bytes: compact, sorted keys, UTF-8 (non-ASCII text is not \\u-escaped)."""
+    return json.dumps(value, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
+
+
+_dictionaries = None
+
+
+def dictionaries():
+    """({sha256: bytes} of the installed DEFLATE dictionaries, sha256 of the default one).
+
+    The dictionaries are committed files (dictionaries/navi-deflate-N.dict); installs only copy them.
+    """
+    global _dictionaries
+    if _dictionaries is None:
+        known = {}
+        try:
+            for path in sorted(DICTIONARIES.glob("navi-deflate-*.dict")):
+                data = path.read_bytes()
+                if not 0 < len(data) <= 32768:
+                    raise ValueError(f"Invalid compression dictionary: {path}")
+                known[digest(data)] = data
+            name, expected = (DICTIONARIES / "DEFAULT").read_text().split()
+        except FileNotFoundError:
+            raise ValueError(f"Compression dictionaries are not installed in {DICTIONARIES}") from None
+        if expected not in known or not re.fullmatch(r"navi-deflate-[1-9][0-9]*\.dict", name) \
+                or digest((DICTIONARIES / name).read_bytes()) != expected:
+            raise ValueError(f"{DICTIONARIES / 'DEFAULT'} does not match an installed dictionary")
+        _dictionaries = (known, expected)
+    return _dictionaries
+
+
+def deflate(data, dictionary):
+    compressor = zlib.compressobj(9, zlib.DEFLATED, -15, zdict=dictionary)
+    return compressor.compress(data) + compressor.flush()
+
+
+def inflate(data, dictionary, limit=MAX_PAYLOAD):
+    decompressor = zlib.decompressobj(-15, zdict=dictionary)
+    try:
+        result = decompressor.decompress(data, limit + 1)
+    except zlib.error:
+        raise ValueError("Invalid compressed payload") from None
+    if len(result) > limit or decompressor.unconsumed_tail:
+        raise ValueError("Compressed payload exceeds its size limit")
+    if not decompressor.eof or decompressor.unused_data:
+        raise ValueError("Invalid compressed payload")
+    return result
+
+
+def pack_payload(raw, compress=True):
+    """Envelope fields for signed bytes: DEFLATE with the default dictionary when that is shorter."""
+    plain = b64(raw)
+    if compress and len(raw) >= COMPRESS_MIN:
+        known, default = dictionaries()
+        packed = b64(deflate(raw, known[default]))
+        if len(packed) < len(plain):
+            return {"payload_deflate_b64": packed, "payload_dictionary_sha256": default}
+    return {"payload_b64": plain}
+
+
+def payload_bytes(value):
+    """The signed bytes of an envelope, plain or compressed. The caller still verifies the signature."""
+    if not isinstance(value, dict) or ("payload_b64" in value) == ("payload_deflate_b64" in value):
+        raise ValueError("Invalid envelope")
+    if "payload_b64" in value:
+        if "payload_dictionary_sha256" in value:
+            raise ValueError("Invalid envelope")
+        return unb64(value["payload_b64"])
+    dictionary = dictionaries()[0].get(value.get("payload_dictionary_sha256"))
+    if dictionary is None:
+        raise ValueError("Unknown compression dictionary")
+    return inflate(unb64(value["payload_deflate_b64"]), dictionary)
+
+
+def check_layout_text(value, limit, allow_layout=False):
+    """Printable display text; only a command may also contain newlines and tabs."""
+    return isinstance(value, str) and len(value) <= limit and not any(
+        (ord(c) < 32 and not (allow_layout and c in "\n\t")) or 0x7f <= ord(c) <= 0x9f
+        or 0x202a <= ord(c) <= 0x202e or 0x2066 <= ord(c) <= 0x2069 or 0xd800 <= ord(c) <= 0xdfff for c in value)
 
 
 def spki(key):
@@ -257,7 +341,7 @@ class NetworkPhone:
             stream = connection.makefile("rwb")
             hello = self._read(stream)
             identity = hello["identity"]
-            payload = unb64(identity["payload_b64"])
+            payload = payload_bytes(identity)
             self.leaf.public_key().verify(unb64(identity["signature_b64"]), payload, ec.ECDSA(hashes.SHA256()))
             statement = json.loads(payload)
             if statement.get("domain") != DOMAIN or statement.get("kind") != "network-identity" or statement.get("phone_key_id") != self.phone_id:
@@ -311,7 +395,7 @@ class NetworkPhone:
         if name not in {"request.json", "receipt.json", "cancel.json"} or len(encode(value)) > 65536:
             raise ValueError("Invalid computer message")
         if name == "request.json":
-            self.request_id = json.loads(unb64(value["payload_b64"]))["request_id"]
+            self.request_id = json.loads(payload_bytes(value))["request_id"]
         self._exchange("write", name, value)
 
     def read(self, name):
@@ -378,6 +462,61 @@ def kdeconnect_endpoint(device_id, environment=None, account=None, *, refresh=Fa
     raise ConnectionError("Phone not found after KDE Connect network discovery")
 
 
+PHONE_PORT = 39841  # Navi's direct local-network listener
+
+
+def kdeconnect_lan_addresses(device_id, environment=None, account=None, timeout=5):
+    """Local addresses of the phone from KDE Connect discovery; empty when KDE Connect cannot see it."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", device_id):
+        raise ValueError("Invalid KDE Connect device ID")
+    options = {}
+    if account is not None:
+        options = dict(user=account.pw_uid, group=account.pw_gid, extra_groups=[], cwd="/",
+                       env={"PATH": "/usr/bin:/bin", "HOME": account.pw_dir,
+                            "DBUS_SESSION_BUS_ADDRESS": (environment or {}).get("DBUS_SESSION_BUS_ADDRESS", ""),
+                            "XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"})
+    if account is not None and not options["env"]["DBUS_SESSION_BUS_ADDRESS"]:
+        raise ValueError("No desktop session (KDE Connect runs only after login)")
+    result = subprocess.run(["/usr/bin/qdbus6", "org.kde.kdeconnect", "/modules/kdeconnect/devices/" + device_id,
+                             "org.freedesktop.DBus.Properties.Get", "org.kde.kdeconnect.device", "isReachable"],
+                            capture_output=True, timeout=timeout, check=True, **options)
+    if result.stdout.decode(errors="replace").strip() != "true":
+        return []
+    return kdeconnect_addresses(device_id, environment, account, timeout)
+
+
+def lan_probe(addresses, timeout=2.0):
+    """("open", address) when Navi's port accepts a connection; ("present", None) when the phone answers
+    on the network but that port is closed (or only KDE Connect's port 1716 answers); ("absent", None)
+    when nothing answers (KDE Connect's "reachable" can be stale after the phone leaves Wi-Fi)."""
+    results = {}
+    lock = threading.Lock()
+
+    def probe(host, port):
+        try:
+            socket.create_connection((host, port), timeout=timeout).close()
+            outcome = "open"
+        except ConnectionRefusedError:
+            outcome = "refused"
+        except OSError:
+            outcome = "silent"
+        with lock:
+            results[(host, port)] = outcome
+
+    workers = [threading.Thread(target=probe, args=(host, port), daemon=True)
+               for host in addresses for port in (PHONE_PORT, 1716)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout + 0.5)
+    for host in addresses:
+        if results.get((host, PHONE_PORT)) == "open":
+            return "open", host
+    if any(outcome in ("open", "refused") for outcome in results.values()):
+        return "present", None
+    return "absent", None
+
+
 def kdeconnect_addresses(device_id, environment=None, account=None, timeout=5):
     """IP addresses KDE Connect currently associates with the paired device (may be stale)."""
     import ipaddress
@@ -433,19 +572,42 @@ def lan_present(addresses, timeout=2.0, ports=(1716, 39841)):
     return present.is_set()
 
 
-def envelope(key, payload):
+def envelope(key, payload, compress=True):
     raw = encode(payload)
-    return {"payload_b64": b64(raw), "signature_b64": b64(key.sign(raw, ec.ECDSA(hashes.SHA256())))}
+    if len(raw) > MAX_PAYLOAD:
+        raise ValueError(f"Request too large for the phone ({len(raw)} bytes)")
+    return {**pack_payload(raw, compress), "signature_b64": b64(key.sign(raw, ec.ECDSA(hashes.SHA256())))}
+
+
+def certificate_fields(root, leaf_der, by_reference):
+    """The certificates a request carries. Paired requests send only their SHA-256: Navi already holds both
+    certificates from pairing and refuses any request whose certificates differ from the stored ones.
+    Enrollment sends them in full (nothing is stored yet). Certificates are public; no private key is sent."""
+    machine_der = root.public_bytes(serialization.Encoding.DER)
+    if by_reference:
+        return {"machine_certificate_sha256": digest(machine_der), "phone_certificate_sha256": digest(leaf_der)}
+    return {"machine_certificate_b64": b64(machine_der), "phone_certificate_b64": b64(leaf_der)}
+
+
+def response_certificate_matches(response, leaf_der):
+    """A signed response names the phone certificate the request used, by hash or (enrollment) in full."""
+    if "phone_certificate_sha256" in response:
+        return response["phone_certificate_sha256"] == digest(leaf_der)
+    return response.get("phone_certificate_b64") == b64(leaf_der)
+
+
+def check_message_size(value, what="Request"):
+    size = len(encode(value))
+    if size > MAX_MESSAGE:
+        raise ValueError(f"{what} too large for the phone ({size} bytes; at most {MAX_MESSAGE})")
 
 
 def validate_context(context):
     for name, limit, empty in (("application", 80, False), ("action_id", 160, False),
-            ("command", 512, True), ("requesting_user", 64, False), ("target_user", 64, False),
+            ("command", MAX_COMMAND, True), ("requesting_user", 64, False), ("target_user", 64, False),
             ("source", 64, False), ("icon_name", 128, True)):
         value = context.get(name, "")
-        if not isinstance(value, str) or (not empty and not value) or len(value) > limit or any(
-                ord(c) < 32 or 0x7f <= ord(c) <= 0x9f or 0x202a <= ord(c) <= 0x202e
-                or 0x2066 <= ord(c) <= 0x2069 for c in value):
+        if not check_layout_text(value, limit, allow_layout=name == "command") or (not empty and not value):
             raise ValueError(f"Invalid {name} display metadata.")
     if type(context.get("requesting_uid")) is not int or context["requesting_uid"] != os.getuid():
         raise ValueError("Requesting UID must match this session.")
@@ -503,6 +665,18 @@ def remote_config(db, key_id):
     return dict(server=row[0], token=row[1], phone_topic=row[2], computer_topic=row[3], key=bytes(row[4]))
 
 
+def remote_id(phone_topic):
+    """Short identifier of one remote approval setup (from its topic); shows whether two copies match."""
+    return digest(phone_topic.encode("ascii"))[:16] if phone_topic else None
+
+
+def remote_ids(db):
+    try:
+        return {key_id: remote_id(topic) for key_id, topic in db.execute("SELECT key_id, phone_topic FROM remote")}
+    except sqlite3.OperationalError:
+        return {}
+
+
 def remote_servers(db):
     try:
         return dict(db.execute("SELECT key_id, server FROM remote").fetchall())
@@ -553,7 +727,7 @@ def verify_hello(hello, code, session_id, machine_id):
     """The phone's key is only accepted with a tag made from the code the user typed."""
     if not isinstance(hello, dict) or hello.get("request_id") != session_id or hello.get("kind") != "enroll-hello":
         return None
-    raw = unb64(hello["payload_b64"])
+    raw = payload_bytes(hello)
     if len(raw) > 8192 or not hmac.compare_digest(unb64(hello["code_tag_b64"]), code_tag(code, "navi-enroll-hello/v1", raw)):
         raise ValueError("Phone confirmation does not match the pairing code.")
     value = json.loads(raw)
@@ -578,7 +752,7 @@ def pair_with_code(device, machine_key, root):
                    "machine_id": machine_id, "machine_name": socket.gethostname(),
                    "desktop_device_id": transport.transport["desktop_device_id"],
                    "issued_at_ms": now, "expires_at_ms": now + OFFER_TTL * 1000}
-        offer = envelope(machine_key, payload)
+        offer = envelope(machine_key, payload, compress=False)  # code-tagged; read before any dictionary check
         offer["machine_certificate_b64"] = b64(root.public_bytes(serialization.Encoding.DER))
         offer["code_tag_b64"] = b64(code_tag(code, "navi-enroll-offer/v1", encode(payload)))
         transport.check()
@@ -619,6 +793,7 @@ def enrolled_devices(db):
 def known_devices(db):
     enrolled = enrolled_devices(db)
     remotes = remote_servers(db)
+    ids = remote_ids(db)
     topics = remote_topic_urls(db)
     devices = kdeconnect_module().list_devices()
     for device in devices:
@@ -626,6 +801,7 @@ def known_devices(db):
         device["enrolled"] = record is not None
         device["phone_key_id"] = record["key_id"] if record else None
         device["remote"] = remotes.get(device["phone_key_id"]) if record else None
+        device["remote_id"] = ids.get(device["phone_key_id"]) if record else None
         urls = topics.get(device["phone_key_id"]) if record else None
         device["remote_phone_url"], device["remote_computer_url"] = urls if urls else (None, None)
     return devices
@@ -701,6 +877,7 @@ def approve(args, db, machine_key, root):
     device = None
     leaf = None
     setup_key = None
+    remote = None  # ntfy settings for the selected phone, when set up
     if setup:
         # Remote setup travels over the phone's normal route (KDE Connect messages).
         device = select_device(db, args.setup_device, "authenticate")
@@ -718,10 +895,11 @@ def approve(args, db, machine_key, root):
         phone = kdeconnect_transport()(sys.modules[__name__], device["id"], machine_key, root, leaf)
         phone.check()
     elif not enrolling and not setup and not (args.endpoint or args.serial or args.kdeconnect_device or args.kdeconnect_messages):
-        # Default authentication route: signed messages over the enrolled phone's KDE Connect pairing.
-        device = select_device(db, None, "authenticate")
+        # Default: automatic route (local network → KDE Connect messages → ntfy) for the chosen phone.
+        device = select_device(db, getattr(args, "device", None), "authenticate")
         args.kdeconnect_messages = device["id"]
         args.phone_key_id = args.phone_key_id or device["phone_key_id"]
+        args.auto_route = True
     elif not enrolling and not setup:
         for name in ("kdeconnect_messages", "kdeconnect_device"):
             if getattr(args, name):
@@ -749,7 +927,21 @@ def approve(args, db, machine_key, root):
                 raise ValueError("Remote approvals are not set up for this phone (System Settings → Remote approvals)")
             return remote_module().RemotePhone(sys.modules[__name__], remote, machine_key, root, leaf)
 
-        if args.remote_only:
+        if getattr(args, "auto_route", False):
+            device_id = args.kdeconnect_messages
+
+            def make_lan(address):
+                resolver = lambda **options: kdeconnect_endpoint(device_id, **options)
+                return NetworkPhone(f"{address}:{PHONE_PORT}", machine_key, root, leaf, resolver)
+
+            phone = remote_module().ChainPhone(
+                lambda: kdeconnect_lan_addresses(device_id), lan_probe, make_lan, make_primary,
+                make_remote if remote is not None else None)
+            phone.check()
+            route = {"lan": "network", "kde": "kdeconnect", "remote": "ntfy"}[phone.route]
+            emit("step", step="route", route=route)
+            say(f"Route: {route}")
+        elif args.remote_only:
             phone = make_remote()
             phone.check()
             emit("step", step="route", route="ntfy")
@@ -843,7 +1035,7 @@ def approve(args, db, machine_key, root):
         if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.desktop_request_id):
             raise ValueError("Invalid desktop request UUID.")
         payload["context"]["desktop_request_id"] = args.desktop_request_id
-    if isinstance(phone, remote_module().RoutedPhone) or args.remote_only:
+    if remote is not None or args.remote_only:
         payload["remote"] = {"kind": "ntfy"}  # Navi may answer over ntfy, e.g. after Wi-Fi drops.
         if getattr(phone, "route", "remote") == "remote" and payload["context"].get("icon_png_base64"):
             # Over ntfy only the signed icon hash travels; Navi asks for the PNG if it lacks it.
@@ -855,8 +1047,8 @@ def approve(args, db, machine_key, root):
     if hasattr(phone, "transport"):
         payload["transport"] = phone.transport
     request = envelope(machine_key, payload)
-    request["machine_certificate_b64"] = b64(root.public_bytes(serialization.Encoding.DER))
-    request["phone_certificate_b64"] = b64(leaf_der)
+    request.update(certificate_fields(root, leaf_der, by_reference=payload["kind"] != "enroll"))
+    check_message_size(request)
     db.execute("INSERT INTO requests VALUES (?, ?, 'pending')", (request_id, encode(payload)))
     db.commit()
     deadline = time.monotonic() + TTL
@@ -873,8 +1065,8 @@ def approve(args, db, machine_key, root):
             if response and response.get("request_id") == request_id:
                 if response.get("status") != "signed":
                     raise ValueError("Phone declined: " + str(response.get("message", "approval canceled")))
-                raw = unb64(response["payload_b64"])
-                if raw != encode(payload) or response["phone_certificate_b64"] != b64(leaf_der):
+                raw = payload_bytes(response)
+                if raw != encode(payload) or not response_certificate_matches(response, leaf_der):
                     raise ValueError("Response does not match the outstanding challenge and certificate.")
                 signature = unb64(response["signature_b64"])
                 signed = raw
@@ -1007,47 +1199,63 @@ def kdesu_navi_enabled(path=KDESU):
     return KDESU_MARKER.encode("utf-16-le") in data or KDESU_MARKER.encode() in data
 
 
-def sudo_approval_state():
-    """Optional sudo approval (built with USE=sudo / ENABLE_SUDO=yes): None when not installed,
-    else the state of /etc/pam.d/sudo: enabled | disabled | misplaced | outdated | unrecognized | unreadable."""
-    module_path = Path(__file__).resolve().with_name("sudo_pam.py")
-    if not module_path.exists() or not module_path.with_name("sudo-approve").exists():
-        return None  # Not built in (or a source checkout without the installed helper).
+def pam_approval_states():
+    """Optional phone approvals this build installed (USE=sudo / USE=login): {service: state} for
+    sudo, sddm and kde, each enabled | disabled | misplaced | outdated | unrecognized | unreadable."""
+    module_path = Path(__file__).resolve().with_name("pam_switch.py")
+    if not module_path.exists():
+        return {}
     try:
-        spec = importlib.util.spec_from_file_location("navi_sudo_pam", module_path)
+        spec = importlib.util.spec_from_file_location("navi_pam_switch", module_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return module.status()["state"]
+        # A source checkout has no installed helpers next to it, so nothing is reported there.
+        return {service: module.status(service)["state"] for service in module.available()}
     except Exception:
-        return "unreadable"
+        return {}
 
 
-SUDO_STATE_TEXT = {
-    "enabled": "on (local Konsole/Kitty)",
+PAM_SERVICE_TEXT = {"sudo": "sudo in local Konsole/Kitty", "sddm": "SDDM login screen", "kde": "Plasma lock screen"}
+PAM_STATE_TEXT = {
+    "enabled": "on",
     "disabled": "installed but off",
-    "misplaced": "NEEDS REPAIR: the line is below the password rule in /etc/pam.d/sudo",
-    "outdated": "NEEDS REPAIR: the line in /etc/pam.d/sudo is not the expected one (e.g. missing seteuid)",
-    "unrecognized": "cannot be turned on: /etc/pam.d/sudo has no auth rules",
-    "unreadable": "unknown: /etc/pam.d/sudo could not be read",
+    "misplaced": "NEEDS REPAIR: the line is below the password rule",
+    "outdated": "NEEDS REPAIR: the line is not the expected one",
+    "unrecognized": "unavailable: the PAM file has no auth rules (or is missing)",
+    "unreadable": "unknown: the PAM file could not be read",
 }
+
+
+def remove_admin_remote(device_id):
+    """Drop remote approvals from the root copy for this KDE Connect device; True if there was one to drop."""
+    status, _ = authority_request("status")
+    if not status or not status.get("valid") or not status.get("account_matches"):
+        return False  # No administrator prompts for this account: nothing to keep in step.
+    if not any(phone.get("kdeconnect_device") == device_id and phone.get("remote") for phone in status.get("phones", [])):
+        return False
+    reply, error = authority_request("remote-off", kdeconnect_device=device_id)
+    if reply is None:
+        raise RuntimeError(f"Could not turn off remote approvals for administrator prompts: {error}")
+    return True
 
 
 def authority_status():
     reply, error = authority_request("status")
-    sudo = sudo_approval_state()
+    pam = pam_approval_states()
     if reply is None:
-        emit("authority", available=False, error=error, sudo_approval=sudo)
+        emit("authority", available=False, error=error, pam_approval=pam)
         say(error)
         return
     status = {name: reply.get(name) for name in ("configured", "valid", "reason", "account_matches", "enabled",
                                                  "machine_key_id", "phones") if name in reply}
     kdesu_navi = kdesu_navi_enabled()
-    emit("authority", available=True, kdesu_navi=kdesu_navi, sudo_approval=sudo, **status)
+    emit("authority", available=True, kdesu_navi=kdesu_navi, pam_approval=pam, **status)
     if JSON_MODE:
         return
-    if sudo is not None:
-        print("Phone approval for sudo:", SUDO_STATE_TEXT.get(sudo, sudo)
-              + (" (repair: System Settings → Navi Authenticator, or sudo-pam enable as root)" if sudo in ("misplaced", "outdated") else ""))
+    for service, state in pam.items():
+        repair = f" (repair: System Settings → Navi Authenticator, or navi-pam enable {service} as root)" \
+            if state in ("misplaced", "outdated") else ""
+        print(f"Phone approval for {PAM_SERVICE_TEXT.get(service, service)}: {PAM_STATE_TEXT.get(state, state)}{repair}")
     if not status.get("configured"):
         print("Administrator prompts: not configured on this computer.")
     elif not status.get("valid"):
@@ -1145,6 +1353,8 @@ def main():
             command.add_argument("--desktop-request-id", help="Associated desktop dialog UUID")
             command.add_argument("--notification-only", action="store_true", help="Verify phone approval without authorizing desktop execution")
             command.add_argument("--remote-only", action="store_true", help="Send over ntfy even if KDE Connect can see the phone (test)")
+            command.add_argument("--device", metavar="ID_OR_NAME",
+                                 help="Phone for the automatic route (local network, then KDE Connect messages, then ntfy)")
     args = parser.parse_args()
     JSON_MODE = args.json
     if args.command == "remote-setup":
@@ -1195,10 +1405,9 @@ def main():
         return
     if getattr(args, "operation", "") and (len(args.operation) > 160 or any(ord(c) < 32 for c in args.operation)):
         raise ValueError("Operation must be printable text of at most 160 characters.")
-    for name, limit in (("application", 80), ("action_id", 160), ("requested_command", 512), ("target_user", 64), ("icon_name", 128)):
+    for name, limit in (("application", 80), ("action_id", 160), ("requested_command", MAX_COMMAND), ("target_user", 64), ("icon_name", 128)):
         value = getattr(args, name, "")
-        if len(value) > limit or any(ord(c) < 32 or 0x7f <= ord(c) <= 0x9f or 0x202a <= ord(c) <= 0x202e
-                                     or 0x2066 <= ord(c) <= 0x2069 for c in value):
+        if not check_layout_text(value, limit, allow_layout=name == "requested_command"):
             raise ValueError(f"{name} must be plain display text of at most {limit} characters.")
     if getattr(args, "icon_file", None) is not None:
         icon = args.icon_file.read_bytes()
@@ -1240,10 +1449,16 @@ def main():
                 emit("done", result="revoked" if count else "not-approved", phone_key_id=args.key_id)
             elif args.command == "remote-remove":
                 device = select_device(db, args.setup_device, "authenticate")
+                # The protected administrator copy goes first (no password: it only removes a capability).
+                # If that fails, this account's settings stay too, so the two copies never disagree.
+                admin = remove_admin_remote(device["id"])
                 with db:
                     count = db.execute("DELETE FROM remote WHERE key_id=?", (device["phone_key_id"],)).rowcount
-                say(f"Remote approvals turned off for {device['name']}. Also turn them off in Navi → ☰ → Settings."
-                    if count else f"Remote approvals were not set up for {device['name']}.")
+                if count or admin:
+                    say(f"Remote approvals turned off for {device['name']}"
+                        + (" (also for administrator prompts)" if admin else "") + ". Also turn them off in Navi → ☰ → Settings.")
+                else:
+                    say(f"Remote approvals were not set up for {device['name']}.")
                 emit("done", result="remote-removed", device_id=device["id"], phone_key_id=device["phone_key_id"])
             else:
                 approve(args, db, machine_key, root)

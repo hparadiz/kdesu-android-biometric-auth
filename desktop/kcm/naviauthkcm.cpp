@@ -13,6 +13,7 @@
 #include <QFileInfo>
 #include <QProcessEnvironment>
 #include <QSettings>
+#include <QVariantMap>
 #include <QStandardPaths>
 
 #include <algorithm>
@@ -55,19 +56,30 @@ QString polkitConfigure()
     return environmentOr("NAVI_AUTH_POLKIT_CONFIGURE", NAVI_AUTH_POLKIT_CONFIGURE_DEFAULT);
 }
 
-QString sudoPam()
+QString pamSwitch()
 {
-    return environmentOr("NAVI_AUTH_SUDO_PAM", NAVI_AUTH_SUDO_PAM_DEFAULT);
+    return environmentOr("NAVI_AUTH_PAM_SWITCH", NAVI_AUTH_PAM_SWITCH_DEFAULT);
+}
+
+QString pamServiceLabel(const QString &service)
+{
+    if (service == QLatin1String("sudo")) {
+        return i18n("sudo in local Konsole and Kitty terminals");
+    }
+    if (service == QLatin1String("sddm")) {
+        return i18n("the SDDM login screen");
+    }
+    return i18n("the Plasma lock screen");
 }
 
 bool pkexecTask(const QString &task)
 {
-    return task == QLatin1String("authority-enable") || task == QLatin1String("sudo-enable") || task == QLatin1String("sudo-disable");
+    return task == QLatin1String("authority-enable") || task == QLatin1String("pam-enable") || task == QLatin1String("pam-disable");
 }
 
 QSettings uiState()
 {
-    // Remembers only that sudo approval was turned on here, to notice when a sudo update removes it.
+    // Remembers only which approvals were turned on here, to notice when a package update removes one.
     return QSettings(QStringLiteral("navi-auth"), QStringLiteral("kcm"));
 }
 
@@ -224,7 +236,10 @@ void NaviAuthKcm::sendTest(const QString &deviceId, const QString &transport)
     // pinned TLS connection, the same route kdesu uses with the LAN transport. Remote: ntfy only.
     m_testTransport = transport;
     const bool network = transport == QLatin1String("network");
-    QStringList arguments{QStringLiteral("authenticate"), network ? QStringLiteral("--kdeconnect-device") : QStringLiteral("--kdeconnect-messages"),
+    // Automatic: the same order kdesu, sudo and the lock screen use (local network, KDE Connect messages, ntfy).
+    const QString routeOption = transport == QLatin1String("auto") ? QStringLiteral("--device")
+        : network ? QStringLiteral("--kdeconnect-device") : QStringLiteral("--kdeconnect-messages");
+    QStringList arguments{QStringLiteral("authenticate"), routeOption,
                           deviceId, QStringLiteral("--phone-key-id"), device->phoneKeyId, QStringLiteral("--notification-only"),
                           QStringLiteral("--application"), QStringLiteral("System Settings"), QStringLiteral("--operation"),
                           network ? QStringLiteral("Test network approval from System Settings")
@@ -258,7 +273,8 @@ void NaviAuthKcm::removeRemote(const QString &deviceId)
     if (!device) {
         return;
     }
-    m_updateAdminAfter = device->adminState == QLatin1String("enabled") ? deviceId : QString();
+    // host.py removes the protected administrator copy first itself (no password needed), then this account's.
+    m_updateAdminAfter.clear();
     startTask(QStringLiteral("remote-remove"), deviceId, {QStringLiteral("remote-remove"), QStringLiteral("--kdeconnect-device"), deviceId});
 }
 
@@ -304,28 +320,37 @@ void NaviAuthKcm::disableAdministratorPrompts(const QString &deviceId)
     }
 }
 
-QString NaviAuthKcm::sudoApproval() const
+QVariantMap NaviAuthKcm::pamApproval() const
 {
-    return m_authority.value(QStringLiteral("sudo_approval")).toString();
+    return m_authority.value(QStringLiteral("pam_approval")).toObject().toVariantMap();
 }
 
-bool NaviAuthKcm::canChangeSudoApproval() const
+bool NaviAuthKcm::canChangePamApproval() const
 {
-    return !QStandardPaths::findExecutable(pkexec()).isEmpty() && QFileInfo(sudoPam()).isExecutable();
+    return !QStandardPaths::findExecutable(pkexec()).isEmpty() && QFileInfo(pamSwitch()).isExecutable();
 }
 
-bool NaviAuthKcm::sudoApprovalLost() const
+QStringList NaviAuthKcm::pamApprovalLost() const
 {
-    return sudoApproval() == QLatin1String("disabled") && uiState().value(QStringLiteral("sudoApprovalWanted")).toBool();
+    QStringList lost;
+    const QVariantMap states = pamApproval();
+    QSettings state = uiState();
+    for (auto it = states.cbegin(); it != states.cend(); ++it) {
+        if (it.value().toString() == QLatin1String("disabled") && state.value(QStringLiteral("wanted/") + it.key()).toBool()) {
+            lost.append(it.key());
+        }
+    }
+    return lost;
 }
 
-void NaviAuthKcm::setSudoApproval(bool enabled)
+void NaviAuthKcm::setPamApproval(const QString &service, bool enabled)
 {
-    if (sudoApproval().isEmpty() || !canChangeSudoApproval()) {
+    if (!pamApproval().contains(service) || !canChangePamApproval()) {
         return;
     }
-    startProcess(enabled ? QStringLiteral("sudo-enable") : QStringLiteral("sudo-disable"), QString(), pkexec(),
-                 {sudoPam(), enabled ? QStringLiteral("enable") : QStringLiteral("disable")});
+    m_pamService = service;
+    startProcess(enabled ? QStringLiteral("pam-enable") : QStringLiteral("pam-disable"), QString(), pkexec(),
+                 {pamSwitch(), enabled ? QStringLiteral("enable") : QStringLiteral("disable"), service});
 }
 
 bool NaviAuthKcm::authorityAvailable() const
@@ -489,7 +514,7 @@ void NaviAuthKcm::taskExited(int exitCode, QProcess::ExitStatus status)
             exitCode = 130; // treated as a quiet cancel below
         } else if (exitCode == 127) {
             m_taskError = task == QLatin1String("authority-enable") ? i18n("Not authorized to change administrator prompts.")
-                                                                     : i18n("Not authorized to change how sudo authenticates.");
+                                                                     : i18n("Not authorized to change how %1 authenticates.", pamServiceLabel(m_pamService));
         } else if (exitCode != 0) {
             const QStringList lines = standardError.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
             m_taskError = lines.isEmpty() ? QString() : lines.last();
@@ -500,6 +525,12 @@ void NaviAuthKcm::taskExited(int exitCode, QProcess::ExitStatus status)
     if (success) {
         if (task == QLatin1String("enroll")) {
             result = i18n("%1 is enrolled. Use “Send test” to try an approval.", m_taskDeviceName);
+        } else if (task == QLatin1String("test") && m_testTransport == QLatin1String("auto")) {
+            result = m_route == QLatin1String("network")
+                ? i18n("%1 approved the test over the direct local network (Navi's connection).", m_taskDeviceName)
+                : m_route == QLatin1String("ntfy")
+                ? i18n("%1 approved the test over ntfy (not reachable on the local network).", m_taskDeviceName)
+                : i18n("%1 approved the test over KDE Connect messages (Navi's network connection is off).", m_taskDeviceName);
         } else if (task == QLatin1String("test")) {
             result = m_route == QLatin1String("ntfy") && m_testTransport != QLatin1String("remote")
                 ? i18n("%1 approved the test over ntfy (KDE Connect couldn't see the phone) with a verified signature.", m_taskDeviceName)
@@ -518,12 +549,15 @@ void NaviAuthKcm::taskExited(int exitCode, QProcess::ExitStatus status)
                 : i18n("%1 can no longer approve requests from this account.", m_taskDeviceName);
         } else if (task == QLatin1String("authority-revoke")) {
             result = i18n("%1 can no longer approve administrator prompts.", m_taskDeviceName);
-        } else if (task == QLatin1String("sudo-enable")) {
-            result = i18n("sudo in local Konsole and Kitty terminals now asks your phone first; the password stays as the fallback.");
-            uiState().setValue(QStringLiteral("sudoApprovalWanted"), true);
-        } else if (task == QLatin1String("sudo-disable")) {
-            result = i18n("sudo asks for your password again, as before.");
-            uiState().setValue(QStringLiteral("sudoApprovalWanted"), false);
+        } else if (task == QLatin1String("pam-enable")) {
+            result = m_pamService == QLatin1String("sudo")
+                ? i18n("sudo in local Konsole and Kitty terminals now asks your phone first; the password stays as the fallback.")
+                : i18n("On %1, press Enter with an empty password to approve on your phone; typing the password works as before.",
+                       pamServiceLabel(m_pamService));
+            uiState().setValue(QStringLiteral("wanted/") + m_pamService, true);
+        } else if (task == QLatin1String("pam-disable")) {
+            result = i18n("%1 asks for your password again, as before.", pamServiceLabel(m_pamService));
+            uiState().setValue(QStringLiteral("wanted/") + m_pamService, false);
         } else if (task == QLatin1String("authority-enable")) {
             result = i18n("%1 can now approve administrator prompts for this account.", m_taskDeviceName);
         } else {
@@ -551,8 +585,7 @@ void NaviAuthKcm::taskExited(int exitCode, QProcess::ExitStatus status)
     }
     m_route.clear();
     const QString updateAdmin = std::exchange(m_updateAdminAfter, QString());
-    if ((task == QLatin1String("remote-setup") || task == QLatin1String("remote-remove")) && success && updateAdmin == deviceId
-        && canEnableAdministratorPrompts()) {
+    if (task == QLatin1String("remote-setup") && success && updateAdmin == deviceId && canEnableAdministratorPrompts()) {
         // Copy the changed remote settings into the protected administrator entry (password prompt).
         setMessages(QString(), result);
         Q_EMIT taskChanged();

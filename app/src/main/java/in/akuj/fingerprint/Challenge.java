@@ -20,7 +20,7 @@ final class Challenge {
 
     Challenge(JSONObject envelope, X509Certificate machine, X509Certificate phone, boolean allowExpired) throws Exception {
         this.envelope = envelope;
-        bytes = Bridge.decode(envelope.getString("payload_b64"));
+        bytes = Payloads.bytes(envelope);
         payload = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
         id = payload.getString("request_id");
         kind = payload.getString("kind");
@@ -31,7 +31,7 @@ final class Challenge {
         context = payload.getJSONObject("context");
         validateText(context.getString("application"), 80, false);
         validateText(context.getString("action_id"), 160, false);
-        validateText(context.getString("command"), 512, true);
+        validateText(context.getString("command"), Limits.MAX_COMMAND, true, true);
         validateText(context.getString("requesting_user"), 64, false);
         validateText(context.getString("target_user"), 64, false);
         validateText(context.getString("source"), 64, false);
@@ -42,13 +42,13 @@ final class Challenge {
         validateText(operation, 160, false);
         validateText(machineName, 128, false);
         if ("execute".equals(context.optString("mode"))) {
+            // Execution v2: the signed context.command is the single copy that is shown and run by
+            // `/bin/sh -c`. A request still carrying an argv copy is from an incompatible computer.
             JSONObject execution = payload.getJSONObject("execution");
-            org.json.JSONArray argv = execution.getJSONArray("argv");
-            if (argv.length() != 3 || !"/bin/sh".equals(argv.getString(0)) || !"-c".equals(argv.getString(1))
-                    || !context.getString("command").equals(argv.getString(2))
+            if (execution.has("argv") || !"/bin/sh -c".equals(execution.optString("shell"))
                     || execution.getInt("uid") != 0 || execution.getInt("gid") != 0
-                    || !"root".equals(context.getString("target_user")))
-                throw new IllegalArgumentException("Execution does not match the displayed command and account.");
+                    || !"root".equals(context.getString("target_user")) || context.getString("command").isEmpty())
+                throw new IllegalArgumentException("Execution does not match the displayed command and account. Update the computer and Navi together.");
             validateText(execution.getString("cwd"), 4096, false);
             if (!execution.getString("cwd").startsWith("/"))
                 throw new IllegalArgumentException("Invalid execution directory.");
@@ -86,9 +86,15 @@ final class Challenge {
     boolean remoteSetup() { return "remote-setup".equals(kind); }
 
     private static void validateText(String value, int limit, boolean allowEmpty) {
+        validateText(value, limit, allowEmpty, false);
+    }
+
+    /** Printable text; {@code allowLayout} (commands only) also permits newlines and tabs. */
+    static void validateText(String value, int limit, boolean allowEmpty, boolean allowLayout) {
         if ((!allowEmpty && value.isEmpty()) || value.length() > limit) throw new IllegalArgumentException("Invalid request display metadata.");
         for (int i = 0; i < value.length(); i++) {
             char c = value.charAt(i);
+            if (allowLayout && (c == '\n' || c == '\t')) continue;
             if (Character.isISOControl(c) || (c >= '\u202a' && c <= '\u202e') || (c >= '\u2066' && c <= '\u2069')) {
                 throw new IllegalArgumentException("Request metadata contains hidden formatting characters.");
             }

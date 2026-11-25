@@ -2,8 +2,10 @@
 <!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
 <pkgmetadata>
 	<use>
+		<flag name="login">Install the optional helper that lets the enrolled phone approve the SDDM
+			login screen and the Plasma lock screen (switched on per screen in System Settings)</flag>
 		<flag name="sudo">Install the optional helper that lets the enrolled phone approve
 			<pkg>app-admin/sudo</pkg> in local Konsole/Kitty terminals (activated by adding a
-			pam_exec line to /etc/pam.d/sudo)</flag>
+			pam_exec line to /etc/pam.d/sudo, switched on in System Settings)</flag>
 	</use>
 </pkgmetadata>

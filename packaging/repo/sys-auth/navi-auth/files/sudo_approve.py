@@ -23,49 +23,35 @@ import shlex
 import signal
 import sys
 import time
+import uuid
 from pathlib import Path
 
-SSHD_NAMES = {"sshd", "sshd-session", "sshd-auth"}
 TERMINAL_NAMES = {"konsole": "Konsole", "kitty": "Kitty"}
-MAX_DEPTH = 64
 
 
-class Skip(Exception):
-    """Phone approval is not offered here; fall back to the password (no error shown)."""
+def _common():
+    spec = importlib.util.spec_from_file_location("navi_pam_common", Path(__file__).resolve().with_name("pam_common.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def say(text):
-    # pam_exec's "stdout" option shows each line in the terminal as PAM text.
-    print(text, flush=True)
+_pam = _common()
+Skip, say, proc_exe, proc_parent_and_uid = _pam.Skip, _pam.say, _pam.proc_exe, _pam.proc_parent_and_uid
+desktop_environment, load_rootauth = _pam.desktop_environment, _pam.load_rootauth
+SSHD_NAMES, MAX_DEPTH = _pam.SSHD_NAMES, _pam.MAX_DEPTH
 
 
-def proc_exe(pid, root="/proc"):
-    try:
-        target = os.readlink(f"{root}/{pid}/exe")
-    except OSError:
-        return ""
-    return target[:-len(" (deleted)")] if target.endswith(" (deleted)") else target  # upgraded while running
+def find_terminal(sudo_pid, uid, terminals, root="/proc", program=None):
+    """The allowed terminal emulator above sudo, owned by the user; no sshd anywhere in the chain.
 
-
-def proc_parent_and_uid(pid, root="/proc"):
-    with open(f"{root}/{pid}/stat", "rb") as stat_file:
-        data = stat_file.read(4096).decode(errors="replace")
-    ppid = int(data[data.rindex(")") + 2:].split()[1])
-    uid = None
-    with open(f"{root}/{pid}/status", "rb") as status_file:
-        for line in status_file.read(16384).decode(errors="replace").splitlines():
-            if line.startswith("Uid:"):
-                uid = int(line.split()[1])  # real uid
-                break
-    with open(f"{root}/{pid}/comm", "rb") as comm_file:
-        comm = comm_file.read(64).decode(errors="replace").strip()
-    return ppid, uid, comm
-
-
-def find_terminal(sudo_pid, uid, terminals, root="/proc"):
-    """The allowed terminal emulator above sudo, owned by the user; no sshd anywhere in the chain."""
+    If `program` is a list, the name of the program the terminal is running (for example an
+    agent such as claude or codex, two levels below the terminal: terminal → shell → program) is
+    appended when it is not sudo itself. It is a label for the phone, not a security check.
+    """
     found = None
     pid = sudo_pid
+    chain = []  # comm names from sudo's parent upwards
     for _ in range(MAX_DEPTH):
         ppid, _, _ = proc_parent_and_uid(pid, root)
         if ppid <= 1:
@@ -75,15 +61,26 @@ def find_terminal(sudo_pid, uid, terminals, root="/proc"):
         exe = proc_exe(pid, root)
         if comm in SSHD_NAMES or os.path.basename(exe) in SSHD_NAMES:
             raise Skip("sudo runs inside an SSH session")
-        if found is None and exe in terminals and owner == uid:
-            found = exe
+        if found is None:
+            if exe in terminals and owner == uid:
+                found = exe
+                if program is not None and len(chain) >= 2:
+                    name = chain[-2]  # terminal → shell (chain[-1]) → program (chain[-2])
+                    if re.fullmatch(r"[A-Za-z0-9_.+-]{1,32}", name) and name != "sudo":
+                        program.append(name)
+            else:
+                chain.append(comm)
     if found is None:
         raise Skip("sudo is not running in an allowed local terminal")
     return found
 
 
-def sudo_command(argv):
-    """Display text and target user from sudo's own argv (a hint: sudo decides what actually runs)."""
+def sudo_command(argv, limit=None):
+    """Display text and target user from sudo's own argv (a hint: sudo decides what actually runs).
+
+    The whole command is always shown: a command longer than the phone's display limit is not
+    offered for phone approval at all (Skip), so nothing can be approved with a hidden tail.
+    """
     target = "root"
     index = 1
     while index < len(argv):
@@ -106,37 +103,15 @@ def sudo_command(argv):
             index += 1  # option with a separate value
         index += 1
     text = "sudo " + shlex.join(argv[1:])
-    text = "".join(c if c.isprintable() else "?" for c in text)
+    # Newlines and tabs are kept (Navi lays them out); other invisible characters become "?".
+    text = "".join(c if c.isprintable() or c in "\n\t" else "?" for c in text)
     for low, high in ((0x202a, 0x202e), (0x2066, 0x2069)):
         text = "".join("?" if low <= ord(c) <= high else c for c in text)
-    if len(text) > 512:
-        text = text[:509] + "..."
+    if limit is not None and len(text) > limit:
+        raise Skip(f"command too long to show on the phone ({len(text)} characters; limit {limit})")
     if not re.fullmatch(r"#?[A-Za-z0-9_.@-]{1,64}", target):
         target = "?"
     return text, target
-
-
-def desktop_environment(sudo_pid, root="/proc"):
-    try:
-        with open(f"{root}/{sudo_pid}/environ", "rb") as environ:
-            raw = environ.read(262144)
-    except OSError:
-        return {}
-    wanted = {"DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"}
-    found = {}
-    for item in raw.split(b"\0"):
-        name, _, value = item.partition(b"=")
-        name = name.decode(errors="replace")
-        if name in wanted:
-            found[name] = value.decode(errors="replace")
-    return found
-
-
-def load_rootauth():
-    spec = importlib.util.spec_from_file_location("navi_rootauth", Path(__file__).resolve().with_name("rootauth.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def check_pam(environ):
@@ -168,11 +143,16 @@ def main(argv=None):
         sudo_pid = os.getppid()
         if os.path.basename(proc_exe(sudo_pid)) != "sudo":
             raise Skip("not started by sudo")
-        terminal = find_terminal(sudo_pid, account.pw_uid, terminals)
+        program = []
+        terminal = find_terminal(sudo_pid, account.pw_uid, terminals, program=program)
         with open(f"/proc/{sudo_pid}/cmdline", "rb") as cmdline:
             sudo_argv = [part.decode(errors="replace") for part in cmdline.read(65536).split(b"\0") if part]
-        command, target = sudo_command(sudo_argv)
         rootauth = load_rootauth()
+        try:
+            command, target = sudo_command(sudo_argv, rootauth.crypto.MAX_COMMAND)
+        except Skip:
+            say(f"This command is too long to review on the phone (limit {rootauth.crypto.MAX_COMMAND} characters) — use your password, or split it up.")
+            raise
         rootauth.check_implementation()
         rootauth.private_directory(rootauth.STATE, 0o700)
         try:
@@ -180,24 +160,41 @@ def main(argv=None):
         except Exception:
             environment = {}  # KDE Connect needs the session bus; LAN and ntfy routes do not.
         name = TERMINAL_NAMES.get(os.path.basename(terminal), os.path.basename(terminal))
+        # Which program asked (e.g. an agent running in the terminal), shown on the phone and logged.
+        label = f"{name} · {program[0]}" if program else name
+        tty = os.environ["PAM_TTY"]
+        request = str(uuid.uuid4())
         with (rootauth.STATE / "authority.lock").open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise Skip("another Navi request is in progress") from None
+            # One phone request at a time: later ones (e.g. other agents) wait their turn.
+            waited = False
+            give_up = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= give_up:
+                        say(f"Not approved on the phone (busy: another Navi request is still waiting) — request {request[:8]}.")
+                        raise Skip(f"another Navi request is in progress; gave up after {timeout} s desktop={request}") from None
+                    if not waited:
+                        say(f"Waiting for another Navi request to finish… (request {request[:8]})")
+                        waited = True
+                    time.sleep(0.5)
             authority = rootauth.Authority()
             if authority.account.pw_uid != account.pw_uid:
                 raise Skip("this account is not enrolled for phone approval")
-            context = {"application": f"sudo · {name}", "action_id": "sudo", "command": command,
+            context = {"application": f"sudo · {label}"[:80], "action_id": "sudo", "command": command,
                        "command_hidden": False, "requesting_user": account.pw_name, "requesting_uid": account.pw_uid,
                        "target_user": target, "source": "sudo", "mode": "approve", "icon_name": "utilities-terminal",
                        "icon_png_base64": "", "tty": os.environ["PAM_TTY"]}
-            rootauth.audit(f"sudo-start user={account.pw_name} terminal={name} tty={os.environ['PAM_TTY']}")
-            say(f"Approve this sudo in Navi on your phone… (Ctrl-C to cancel; password after {timeout} s)")
+            rootauth.audit(f"sudo-start desktop={request} user={account.pw_name} terminal={name} "
+                           f"program={program[0] if program else '-'} tty={tty}")
+            say(f"Approve this sudo in Navi on your phone… (request {request[:8]}; Ctrl-C to cancel; password after {timeout} s)")
             try:
-                asyncio.run(_approve(authority, context, environment, timeout, name))
+                asyncio.run(_approve(authority, context, environment, timeout, label, request))
             finally:
                 authority.db.close()
+            say(f"Approved on the phone — request {request[:8]}.")
         return 0
     except Skip as reason:
         if rootauth is None:
@@ -211,17 +208,23 @@ def main(argv=None):
     except (Exception, KeyboardInterrupt, asyncio.CancelledError) as error:
         if rootauth is not None:
             rootauth.audit(f"sudo-not-approved: {type(error).__name__}: {error}"[:300])
-        say("Not approved on the phone — use your password.")
+        reason = "failed"
+        if rootauth is not None:
+            reason = {rootauth.Rejected: "rejected", rootauth.Unanswered: "timed out",
+                      rootauth.Undelivered: "phone unreachable"}.get(type(error), reason)
+        if isinstance(error, (KeyboardInterrupt, asyncio.CancelledError)):
+            reason = "canceled"
+        say(f"Not approved on the phone ({reason}) — use your password.")
         return 1
 
 
-async def _approve(authority, context, environment, timeout, name):
+async def _approve(authority, context, environment, timeout, name, request):
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         loop.add_signal_handler(sig, task.cancel)
     await authority.approve_only(context, environment, time.monotonic() + timeout,
-                                 f"Approve sudo in {name}", "sudo")
+                                 f"Approve sudo in {name}"[:160], "sudo", desktop_id=request)
 
 
 if __name__ == "__main__":

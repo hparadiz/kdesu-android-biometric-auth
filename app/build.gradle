@@ -7,8 +7,8 @@ android {
         applicationId 'in.akuj.fingerprint'
         minSdk 28
         targetSdk 34
-        versionCode 16
-        versionName '0.10.0'
+        versionCode 18
+        versionName '0.12.0'
     }
     buildTypes {
         release { debuggable false }
@@ -18,3 +18,28 @@ android {
         targetCompatibility JavaVersion.VERSION_1_8
     }
 }
+
+// Same inputs as build.sh: the committed compression dictionaries (copied, never generated) and the
+// command limit (-PnaviMaxCommand=N, default 10240; must be at least the computer's MAX_COMMAND).
+def naviMaxCommand = (project.findProperty('naviMaxCommand') ?: '10240').toString()
+if (!(naviMaxCommand ==~ /[0-9]{3,5}/) || naviMaxCommand.toInteger() < 512 || naviMaxCommand.toInteger() > 16384)
+    throw new GradleException('naviMaxCommand must be a number from 512 to 16384')
+def naviGenerated = layout.buildDirectory.dir('generated/navi/java')
+def naviAssets = layout.buildDirectory.dir('generated/navi/assets')
+tasks.register('naviLimits') {
+    inputs.property('maxCommand', naviMaxCommand)
+    outputs.dir(naviGenerated)
+    doLast {
+        def file = naviGenerated.get().file('in/akuj/fingerprint/Limits.java').asFile
+        file.parentFile.mkdirs()
+        file.text = "package in.akuj.fingerprint;\n\n/** Generated from naviMaxCommand. */\nfinal class Limits {\n" +
+                "    static final int MAX_COMMAND = ${naviMaxCommand};\n    private Limits() { }\n}\n"
+    }
+}
+tasks.register('naviDictionaries', Copy) {
+    from(rootProject.file('dictionaries')) { include 'DEFAULT', 'navi-deflate-*.dict' }
+    into naviAssets.map { it.dir('dictionaries') }
+}
+android.sourceSets.main.java.srcDir naviGenerated
+android.sourceSets.main.assets.srcDir naviAssets
+preBuild.dependsOn 'naviLimits', 'naviDictionaries'

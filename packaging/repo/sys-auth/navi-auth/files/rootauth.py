@@ -32,16 +32,19 @@ RUNTIME = Path("/run/navi-auth")
 CONFIG = Path("/etc/navi-auth/config.json")
 MAX_MESSAGE = 65536
 MAX_IMPLEMENTATION = 1048576  # Installed program files; configuration stays limited to MAX_MESSAGE.
+# PAM helpers (sudo, SDDM) share the user's terminal or screen as stderr; they log to the journal only.
+AUDIT_STDERR = True
 
 
 def audit(message):
     # Closing or filling the caller's diagnostic pipe cannot interrupt authority.
-    try:
-        os.set_blocking(2, False)
-        data = (time.strftime("%Y-%m-%dT%H:%M:%S%z") + " " + message + "\n").encode("utf-8", errors="replace")
-        os.write(2, data[:2048])
-    except OSError:
-        pass
+    if AUDIT_STDERR:
+        try:
+            os.set_blocking(2, False)
+            data = (time.strftime("%Y-%m-%dT%H:%M:%S%z") + " " + message + "\n").encode("utf-8", errors="replace")
+            os.write(2, data[:2048])
+        except OSError:
+            pass
     # kdesu discards the helper's stderr, so also record decisions in the system log
     # (journalctl -t navi-auth). Messages carry IDs and routes, never commands or keys.
     try:
@@ -72,7 +75,7 @@ def trusted_file(path, private=False, limit=MAX_MESSAGE):
 
 IMPLEMENTATION = ("rootauth.py", "host.py", "kdeconnect_transport.py", "ntfy_transport.py")
 # Installed only when built with sudo approval (make ENABLE_SUDO=yes / USE=sudo).
-OPTIONAL_IMPLEMENTATION = ("sudo_approve.py",)
+OPTIONAL_IMPLEMENTATION = ("sudo_approve.py", "login_approve.py", "pam_common.py", "pam_switch.py")
 
 
 def check_implementation(directory=None):
@@ -85,6 +88,13 @@ def check_implementation(directory=None):
         info = source.parent.stat()
         if info.st_uid != 0 or info.st_mode & 0o022:
             raise ValueError("Authority implementation directory is not protected")
+    # The DEFLATE dictionaries shape what is signed and parsed; they get the same protection.
+    dictionaries = directory / "dictionaries"
+    info = dictionaries.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise ValueError("Compression dictionary directory is not protected")
+    for source in [dictionaries / "DEFAULT", *dictionaries.glob("navi-deflate-*.dict")]:
+        trusted_file(source)
 
 
 def private_directory(path, mode):
@@ -96,12 +106,33 @@ def private_directory(path, mode):
         raise ValueError(f"Expected root-owned directory with mode {mode:o}: {path}")
 
 
-def plain(value, limit, field, empty=False):
-    if not isinstance(value, str) or len(value) > limit or (not value and not empty) or any(
-            ord(c) < 32 or 0x7f <= ord(c) <= 0x9f or 0x202a <= ord(c) <= 0x202e
-            or 0x2066 <= ord(c) <= 0x2069 or 0xd800 <= ord(c) <= 0xdfff for c in value):
+def plain(value, limit, field, empty=False, allow_layout=False):
+    """Printable text; allow_layout additionally permits newlines and tabs (commands only)."""
+    if not crypto.check_layout_text(value, limit, allow_layout) or (not value and not empty):
         raise ValueError(f"Invalid {field}")
     return value
+
+
+class Rejected(PermissionError):
+    """The phone owner declined the request."""
+
+
+class Unanswered(TimeoutError):
+    """The request reached a phone but was not answered before it expired."""
+
+
+class Undelivered(ConnectionError):
+    """No phone could be reached."""
+
+
+def no_approval(attempts):
+    """Why no phone approved: rejected, unanswered (timed out) or undelivered, in that order of precedence."""
+    errors = [attempt.error for attempt in attempts if attempt.error]
+    if any("Phone approval was declined" in error for error in errors):
+        return Rejected("Rejected on the phone")
+    if any(attempt.delivered and not attempt.error for attempt in attempts):
+        return Unanswered("No answer from the phone before the request expired")
+    return Undelivered("Phone unreachable: " + (errors[0] if errors else "no enrolled phone could be reached"))
 
 
 def validate_start(event, peer_uid, account):
@@ -126,8 +157,8 @@ def validate_start(event, peer_uid, account):
         raise ValueError("Requesting UID does not match the invoking account")
     if supplied.get("requesting_user") != account.pw_name:
         raise ValueError("Requesting account does not match the invoking account")
-    context = {name: plain(supplied.get(name, ""), limit, name, empty)
-               for name, limit, empty in (("application", 80, False), ("command", 512, False),
+    context = {name: plain(supplied.get(name, ""), limit, name, empty, allow_layout=name == "command")
+               for name, limit, empty in (("application", 80, False), ("command", crypto.MAX_COMMAND, False),
                    ("icon_name", 128, True), ("requester_executable", 4096, True))}
     encoded = supplied.get("icon_png_base64", "")
     if not isinstance(encoded, str) or len(encoded) > 21848:
@@ -244,6 +275,26 @@ def revoke_for_device(uid, event):
         audit("phone-authority-revoked uid=" + str(uid))
 
 
+def remote_off_for_device(uid, event):
+    """Remove remote approvals (ntfy) from the caller's own device entry; like revocation it needs no password."""
+    if set(event) != {"protocol", "event", "request_id", "kdeconnect_device"} or event["event"] != "remote-off":
+        raise ValueError("Invalid remote-off request")
+    with commit_guard():
+        config = json.loads(trusted_file(CONFIG, True), object_pairs_hook=unique_object)
+        if uid == 0 or config.get("uid") != uid:
+            raise ValueError("Request does not match the invoking account and device")
+        entries = phone_entries(config)
+        matching = [entry for entry in entries if entry.get("kdeconnect_device") == event["kdeconnect_device"]]
+        if not matching:
+            raise ValueError("Request does not match an enrolled device")
+        for entry in matching:
+            entry.pop("remote", None)
+        config = dict(enabled=config.get("enabled", True), uid=config["uid"],
+                      machine_key_id=config["machine_key_id"], phones=entries)
+        crypto.atomic_write(CONFIG, crypto.encode(config))
+        audit("phone-remote-off uid=" + str(uid))
+
+
 def authority_status(uid, event):
     """Read-only summary for the invoking account; never exposes logs, executions or certificates."""
     if set(event) != {"protocol", "event", "request_id"} or event["event"] != "status":
@@ -267,7 +318,9 @@ def authority_status(uid, event):
                 pass
             phones.append(dict(phone_key_id=entry["phone_key_id"], enabled=entry.get("enabled", True),
                                transport=entry.get("transport"), kdeconnect_device=entry.get("kdeconnect_device"),
-                               remote=(entry.get("remote") or {}).get("server"), certificate_expires=expires))
+                               remote=(entry.get("remote") or {}).get("server"),
+                               remote_id=crypto.remote_id((entry.get("remote") or {}).get("phone_topic")),
+                               certificate_expires=expires))
     return dict(configured=True, valid=True, account_matches=matches,
                 enabled=bool(config.get("enabled", True)) if matches else None,
                 machine_key_id=config.get("machine_key_id") if matches else None, phones=phones)
@@ -349,23 +402,32 @@ class PhoneAttempt:
                     self.kdeconnect_device, environment, owner.account, **options)
             return crypto.NetworkPhone(self.config.get("endpoint"), owner.key, owner.root, self.leaf, resolver)
 
-        if self.remote is None:
-            return make_primary()
         module = crypto.remote_module()
-        probe = None
+        log = lambda message: audit(f"phone-route phone={self.phone_key_id} {message}")
+        make_remote = None
+        if self.remote is not None:
+            make_remote = lambda: module.RemotePhone(crypto, self.remote, owner.key, owner.root, self.leaf, owner.account)
         if self.kde_messages:
-            # KDE Connect's "reachable" can be stale after Wi-Fi drops: confirm the phone answers.
-            probe = lambda: crypto.lan_present(crypto.kdeconnect_addresses(self.kdeconnect_device, environment, owner.account))
-        routed = module.RoutedPhone(
-            make_primary,
-            lambda: module.RemotePhone(crypto, self.remote, owner.key, owner.root, self.leaf, owner.account),
-            log=lambda message: audit(f"phone-route phone={self.phone_key_id} {message}"), probe=probe)
+            # Automatic route: local network (address from KDE Connect discovery, Navi's port 39841),
+            # then KDE Connect messages, then ntfy when KDE Connect cannot see the phone or delivery fails.
+            device = self.kdeconnect_device
+
+            def make_lan(address):
+                resolver = lambda **options: crypto.kdeconnect_endpoint(device, environment, owner.account, **options)
+                return crypto.NetworkPhone(f"{address}:{crypto.PHONE_PORT}", owner.key, owner.root, self.leaf, resolver)
+
+            phone = module.ChainPhone(lambda: crypto.kdeconnect_lan_addresses(device, environment, owner.account),
+                                      crypto.lan_probe, make_lan, make_primary, make_remote, log)
+        elif make_remote is not None:
+            phone = module.RoutedPhone(make_primary, make_remote, log)
+        else:
+            return make_primary()
         try:
-            routed.check()
+            phone.check()
         except BaseException:
-            routed.close()
+            phone.close()
             raise
-        return routed
+        return phone
 
     async def deliver(self, filename, value, canceled=False):
         await asyncio.to_thread(self.phone.write, filename, value)
@@ -390,7 +452,7 @@ class PhoneAttempt:
                 context=context)
             if execution is not None:
                 self.payload["execution"] = execution
-            if self.kde_messages and hasattr(self.phone, "transport"):
+            if hasattr(self.phone, "transport"):  # Only when the request travels through KDE Connect.
                 self.payload["transport"] = self.phone.transport
             if self.remote is not None:
                 self.payload["remote"] = {"kind": "ntfy"}
@@ -400,15 +462,16 @@ class PhoneAttempt:
                     self.payload["context"] = dict(context, icon_png_base64="", icon_sha256=crypto.digest(png))
                     self.phone.set_icon(png)
             self.request = crypto.envelope(owner.key, self.payload)
-            self.request.update(machine_certificate_b64=crypto.b64(owner.root.public_bytes(crypto.serialization.Encoding.DER)),
-                                phone_certificate_b64=crypto.b64(leaf_der))
+            self.request.update(crypto.certificate_fields(owner.root, leaf_der, by_reference=True))
+            crypto.check_message_size(self.request)
             with owner.db:
                 owner.db.execute("INSERT INTO requests VALUES(?,?,?,'pending')",
                                  (self.request_id, desktop_id, crypto.encode(self.payload)))
             self.delivery_started = True
             await self.deliver("request.json", self.request)
             self.delivered = True
-            route = "ntfy" if getattr(self.phone, "route", None) == "remote" else "kdeconnect" if self.kde_messages else "lan"
+            route = {"remote": "ntfy", "kde": "kdeconnect", "lan": "network"}.get(
+                getattr(self.phone, "route", None), "kdeconnect" if self.kde_messages else "network")
             audit(f"requested request={self.request_id} desktop={desktop_id} phone={self.phone_key_id} route={route}")
             while not self.stopping.is_set() and time.monotonic() < deadline:
                 value = await asyncio.to_thread(self.phone.read, "response.json")
@@ -417,7 +480,7 @@ class PhoneAttempt:
                 if value and value.get("request_id") == self.request_id:
                     if value.get("status") != "signed":
                         raise ValueError("Phone approval was declined")
-                    if crypto.unb64(value["payload_b64"]) != crypto.encode(self.payload) or value["phone_certificate_b64"] != self.request["phone_certificate_b64"]:
+                    if crypto.payload_bytes(value) != crypto.encode(self.payload) or not crypto.response_certificate_matches(value, leaf_der):
                         raise ValueError("Phone response does not match this exact execution")
                     signature = crypto.unb64(value["signature_b64"])
                     self.leaf.public_key().verify(signature, crypto.encode(self.payload), crypto.ec.ECDSA(crypto.hashes.SHA256()))
@@ -489,13 +552,13 @@ class Authority:
         self.db.execute("UPDATE requests SET status='canceled' WHERE status IN ('pending','ready')")
         self.db.commit()
 
-    async def approve_only(self, context, environment, deadline, operation, label):
+    async def approve_only(self, context, environment, deadline, operation, label, desktop_id=None):
         """Phone approval without execution, for an opt-in PAM caller (sudo) that runs the command itself.
 
         Same per-phone signed requests, first-approval-wins, revocation re-check and signed receipt as
         handle(); the receipt carries no execution PID because nothing is launched here.
         """
-        desktop_id = str(uuid.uuid4())
+        desktop_id = desktop_id or str(uuid.uuid4())
         winner = None
         approved = False
         try:
@@ -519,7 +582,7 @@ class Authority:
                         winner = attempt
                         break
             if winner is None:
-                raise ConnectionError("No enrolled phone approved; devices may be offline or have declined")
+                raise no_approval(self.attempts)
             for attempt in self.attempts:
                 if attempt is not winner:
                     attempt.withdraw()
@@ -543,7 +606,8 @@ class Authority:
                 audit(f"{label}-receipt-delivery-failed request={winner.request_id}: {type(error).__name__}")
             return winner
         except (Exception, asyncio.CancelledError) as error:
-            audit(f"{label}-ended desktop={desktop_id} approved={approved} reason={type(error).__name__}: {error}")
+            outcome = {Rejected: "rejected", Unanswered: "timed-out", Undelivered: "unreachable"}.get(type(error), "failed")
+            audit(f"{label}-ended desktop={desktop_id} approved={approved} outcome={outcome} reason={type(error).__name__}: {error}")
             raise
         finally:
             await asyncio.gather(*(attempt.finish(True) if attempt is winner and approved else attempt.withdraw()
@@ -567,7 +631,8 @@ class Authority:
             cwd_fd = os.open(cwd, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
             cwd = os.readlink(f"/proc/self/fd/{cwd_fd}")
             cwd_info = os.fstat(cwd_fd)
-            execution = {"argv": ["/bin/sh", "-c", context["command"]], "uid": 0, "gid": 0,
+            # The signed context.command is the one copy of the command: it is shown and it is what runs.
+            execution = {"shell": "/bin/sh -c", "uid": 0, "gid": 0,
                          "cwd": cwd, "cwd_device": cwd_info.st_dev, "cwd_inode": cwd_info.st_ino, "environment": environment}
             pending = {}
             for attempt in self.attempts:
@@ -594,7 +659,7 @@ class Authority:
                         winner = attempt
                         break
             if winner is None:
-                raise ConnectionError("No enrolled phone approved; devices may be offline or have declined")
+                raise no_approval(self.attempts)
             request_id, request, payload = winner.request_id, winner.request, winner.payload
             # Only this winner can become ready. Other phone proofs are withdrawn
             # concurrently; a slow/offline device cannot delay the command.
@@ -722,6 +787,108 @@ class PipeWriter:
         pass
 
 
+UNLOCK_SECONDS = 60
+LOCK_GREETER = "/usr/libexec/kscreenlocker_greet"
+LOCK_WORKER = "/usr/libexec/kscreenlocker_worker"
+
+
+def _proc_record(pid, root="/proc"):
+    """(parent pid, real uid, exe) as root can read them, also for non-dumpable processes."""
+    with open(f"{root}/{pid}/stat", "rb") as stat_file:
+        data = stat_file.read(4096).decode(errors="replace")
+    ppid = int(data[data.rindex(")") + 2:].split()[1])
+    with open(f"{root}/{pid}/status", "rb") as status_file:
+        uid = next(int(line.split()[1]) for line in status_file.read(16384).decode(errors="replace").splitlines()
+                   if line.startswith("Uid:"))
+    try:
+        exe = os.readlink(f"{root}/{pid}/exe")
+    except OSError:
+        exe = ""
+    return ppid, uid, exe[:-len(" (deleted)")] if exe.endswith(" (deleted)") else exe
+
+
+def verify_lock_screen_caller(uid, caller=None, root="/proc"):
+    """The unlock request must come from the user's own Plasma lock screen.
+
+    authorize execs this process directly, so our parent is the pam_exec helper; its parent must be
+    kscreenlocker_worker started by kscreenlocker_greet (Plasma 6.8+), or kscreenlocker_greet itself,
+    all owned by uid and running root-owned binaries that only root can modify.
+    """
+    caller = os.getppid() if caller is None else caller
+
+    def binary_ok(path):
+        try:
+            info = os.stat(path)
+        except OSError:
+            return False
+        return info.st_uid == 0 and not info.st_mode & 0o022
+
+    helper_parent, helper_uid, _ = _proc_record(caller, root)
+    parent, parent_uid, parent_exe = _proc_record(helper_parent, root)
+    if helper_uid != uid or parent_uid != uid:
+        raise ValueError("The unlock request does not come from this user's lock screen")
+    if parent_exe == LOCK_WORKER and binary_ok(LOCK_WORKER):
+        _, greeter_uid, greeter_exe = _proc_record(parent, root)
+        if greeter_uid == uid and greeter_exe == LOCK_GREETER and binary_ok(LOCK_GREETER):
+            return
+    elif parent_exe == LOCK_GREETER and binary_ok(LOCK_GREETER):
+        return
+    raise ValueError("The unlock request does not come from the Plasma lock screen")
+
+
+async def approve_for_caller(uid, event, writer, loop):
+    """Phone approval to unlock the caller's own Plasma session (the lock screen runs PAM as the user).
+
+    Exists only when built with login approval (login_approve.py installed). The reply only says
+    whether the enrolled phone approved; it grants the caller nothing it could not already do.
+    Context and wording are built here, never taken from the caller.
+    """
+    request_id = event.get("request_id")
+    try:
+        if not Path(__file__).resolve().with_name("login_approve.py").exists():
+            raise ValueError("Phone approval for the lock screen is not installed")
+        if set(event) != {"protocol", "event", "request_id", "kind", "environment"} or event["kind"] != "unlock":
+            raise ValueError("Unexpected approval request")
+        verify_lock_screen_caller(uid)
+        with (STATE / "authority.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError("Another phone request is in progress") from None
+            authority = Authority()
+            try:
+                if uid != authority.account.pw_uid:
+                    raise ValueError("Invoking account is not enrolled")
+                environment = validate_environment(event["environment"], uid)
+                if "DBUS_SESSION_BUS_ADDRESS" not in environment:
+                    # The lock screen is non-dumpable, so the unprivileged helper cannot read its environment.
+                    # The caller chain is verified above; use the session's standard bus, which
+                    # validate_environment() accepts only if the socket and runtime belong to uid.
+                    runtime = Path(f"/run/user/{uid}")
+                    if (runtime / "bus").exists():
+                        environment = validate_environment(
+                            dict(environment, DBUS_SESSION_BUS_ADDRESS=f"unix:path={runtime / 'bus'}",
+                                 XDG_RUNTIME_DIR=str(runtime)), uid)
+                name = authority.account.pw_name
+                context = {"application": "Plasma lock screen", "action_id": "unlock-session", "command": "",
+                           "command_hidden": False, "requesting_user": name, "requesting_uid": uid, "target_user": name,
+                           "source": "kscreenlocker", "mode": "approve", "icon_name": "system-lock-screen",
+                           "icon_png_base64": ""}
+                audit(f"unlock-start user={name}")
+                task = asyncio.create_task(authority.approve_only(
+                    context, environment, time.monotonic() + UNLOCK_SECONDS,
+                    f"Unlock {name}'s session on {socket.gethostname()}"[:160], "unlock"))
+                for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+                    loop.add_signal_handler(sig, task.cancel)
+                await task
+            finally:
+                authority.db.close()
+        await send(writer, "approved", request_id)
+    except (Exception, asyncio.CancelledError) as error:
+        audit(f"unlock-not-approved: {type(error).__name__}: {error}"[:300])
+        await send(writer, "error", request_id, message=str(error)[:180])
+
+
 async def run_stdio(uid):
     reader = asyncio.StreamReader(limit=MAX_MESSAGE)
     loop = asyncio.get_running_loop()
@@ -736,6 +903,13 @@ async def run_stdio(uid):
             return
         if event.get("event") == "status":
             await send(writer, "status", event["request_id"], **authority_status(uid, event))
+            return
+        if event.get("event") == "remote-off":
+            remote_off_for_device(uid, event)
+            await send(writer, "remote-off", event["request_id"])
+            return
+        if event.get("event") == "approve":
+            await approve_for_caller(uid, event, writer, loop)
             return
         with (STATE / "authority.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

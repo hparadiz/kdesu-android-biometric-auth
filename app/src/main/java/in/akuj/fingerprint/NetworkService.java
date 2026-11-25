@@ -213,8 +213,7 @@ public final class NetworkService extends Service {
             OutputStream output = connection.getOutputStream();
             send(output, new JSONObject().put("identity", bridge.read("network-identity.json")).put("nonce", nonce));
             JSONObject envelope = receive(input);
-            byte[] raw = Bridge.decode(envelope.getString("payload_b64"));
-            if (raw.length > 98304) throw new IllegalArgumentException("RPC too large");
+            byte[] raw = Payloads.bytes(envelope);
             JSONObject rpc = new JSONObject(new String(raw, StandardCharsets.UTF_8));
             String machine = rpc.getString("machine_id");
             if (!machine.matches("[a-f0-9]{64}") || !nonce.equals(rpc.getString("server_nonce"))

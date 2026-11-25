@@ -60,7 +60,7 @@ final class NetworkIdentity {
     boolean approved(Bridge bridge, SigningKey key) throws Exception {
         JSONObject value = bridge.read("network-identity.json");
         if (value == null) return false;
-        byte[] payload = Bridge.decode(value.getString("payload_b64"));
+        byte[] payload = Payloads.bytes(value);
         JSONObject statement = new JSONObject(new String(payload, java.nio.charset.StandardCharsets.UTF_8));
         return key.verify(payload, Bridge.decode(value.getString("signature_b64")))
                 && Challenge.DOMAIN.equals(statement.getString("domain"))

@@ -1,0 +1,141 @@
+# Local agent elevation: sudo with Navi phone approval
+
+Machine policy: for agentic development on this Gentoo/KDE workstation, local root
+commands run through the installed `/usr/bin/sudo`. The user approves each command
+on the enrolled phone (Navi) with a fingerprint. This applies across projects and
+agents. It is a choice of authentication route, not blanket authorization for
+privileged actions.
+
+## Choose the route
+
+- Run ordinary builds, source edits and readable diagnostics as the desktop user.
+- For an authorized command requiring local root, use exactly this form:
+
+  ```sh
+  SUDO_ASKPASS=/bin/false script -q -E never -ec "sudo -A <exact root command>" /dev/null < /dev/null
+  ```
+
+  - `script` gives sudo a terminal. Navi's sudo approval only works in a terminal
+    under the user's Konsole or Kitty, and agent shells have none of their own.
+  - `-E never` stops `script` from echoing a stray control character into the output.
+  - `sudo -A` with `SUDO_ASKPASS=/bin/false` makes the password fallback fail at once.
+    The phone check runs before any password is asked. Without this, a rejection or
+    timeout leaves sudo waiting at `Password:` until its own timeout.
+  - Run it with a tool timeout of at least 180 seconds (see "Observe the result").
+- Keep the existing tool sandbox and approval checks. A tool's `require_escalated`
+  setting requests sandbox access; it does not make the process root. When needed,
+  obtain that tool approval and use the sudo form inside it.
+- Do not use kdesu, pkexec, su, doas, plain `sudo` without `-A`, `sudo -n`, `sudo -S`,
+  or a direct authority-helper call as an automatic alternative. The only other form
+  is the password-only one, and only when the phone is unreachable (see "When an
+  approval does not arrive"). If the sudo route fails otherwise, diagnose it and
+  report the concrete blocker. Another route requires the user's explicit choice.
+- Do not try to make approvals last longer. Each wrapped command runs on a new
+  terminal, so every command needs its own phone approval; keep it that way. Do not
+  change sudoers (`timestamp_type`, `timestamp_timeout`, NOPASSWD) or PAM to avoid it.
+- An approval already granted for the concrete operation in the conversation remains
+  valid. Do not ask for the same conversational approval again just because sudo is
+  used. The phone approval is still required for the actual launch.
+- This policy concerns local host elevation. Remote hosts and containers keep their
+  own explicitly authorized authentication mechanisms.
+
+## Write the command
+
+- Quote the command as one argument inside the `script -c` string, using a proper
+  quoting function (Python `shlex.join`/`shlex.quote`) when composing it. Put
+  redirections inside the root command (`sudo -A sh -c '… > /root/file'`) so they
+  happen as root. Avoid double expansion by the outer shell.
+- The phone shows the full command; review is the point. Commands up to the installed
+  limit (default 10240 characters, `MAX_COMMAND` in
+  `/usr/libexec/navi-auth/host.py`) are offered. A longer command is not offered to
+  the phone: sudo falls back to the password, which fails immediately here.
+- Multi-line scripts and tabs are allowed. Navi numbers real lines and marks display
+  breaks after `&&`, `||`, `;` and `|`. Prefer several short, readable commands to one
+  long one. Do not hide a payload in an encoding (base64, compressed or escaped
+  blobs): the user must be able to read what runs.
+- A script file run by path (`sudo -A sh /path/script`) shows only the path, not its
+  contents. Pass the contents instead (`sudo -A sh -c "$(cat file)"`), or keep the
+  script in a root-owned location and verify its digest within the same root command.
+
+## Observe the result
+
+- sudo returns the command's real exit status, and its output comes back through the
+  terminal. Lines end in `\r\n` (from the terminal); strip `\r` when parsing.
+- Every request prints its own short ID first, for example
+  `Approve this sudo in Navi on your phone… (request 1e4d61b1; …)`. Several agents can
+  ask at the same time: each one reads only the lines for its own ID. Navi sends one
+  request to the phone at a time; a later one prints `Waiting for another Navi request
+  to finish… (request …)` and is sent when the earlier one is decided (it gives up
+  after 60 seconds of waiting).
+- Allow up to 60 seconds of waiting plus 60 seconds for the approval: use a tool
+  timeout of at least 180 seconds.
+- The terminal states the outcome in one line, and the journal records it under the
+  same ID (`journalctl -t navi-auth --since -10min -o cat | grep <ID>`; the journal
+  lines carry the full ID as `desktop=<ID>…`):
+
+| Terminal line | Journal (`sudo-ended … outcome=`) | Meaning | What to do |
+| --- | --- | --- | --- |
+| `Approved on the phone — request <ID>.` | `sudo-approved` | Approved; the command ran | Use the command's own exit status and output. |
+| `Not approved on the phone (rejected)` | `outcome=rejected` | **Rejected** on the phone | Do not retry. Do not resend it unchanged; ask, or adjust what was asked for. |
+| `Not approved on the phone (timed out)` | `outcome=timed-out` | Reached the phone but not answered before it expired | Retry (see below). |
+| `Not approved on the phone (phone unreachable)` | `outcome=unreachable` (and `phone-unavailable …`) | No route to the phone | Use the password-only form (see below). |
+| `Not approved on the phone (busy: …)` | `sudo-skipped: another Navi request is in progress …` | Another request kept the phone busy for 60 s | Wait for it, then send again; this does not count as a retry. |
+| none of these; sudo fails | `sudo-skipped: …` | Not offered to the phone (for example over the command limit) | Fix the cause; do not resend unchanged. |
+
+In every "Not approved" case the command did not run.
+
+## When an approval does not arrive
+
+### Timed out: retry, at most three times
+
+- Retry the identical command up to **three times**, one request at a time, each in a
+  fresh run of the sudo form. Before each retry, tell the user briefly that the
+  approval timed out and that the request is being sent again.
+- **If the third retry also times out** (four requests in total), stop. Do not send
+  another request on your own. Tell the user the approval timed out four times and
+  ask them to say when they are ready to watch for it; resend only after they reply.
+  Their reply starts a new count of three retries.
+- A rejection at any point ends the retries. Never retry automatically after a
+  rejection or a skipped request.
+
+### Phone unreachable: password only
+
+When the outcome is `phone unreachable`, run the same command once in the
+password-only form. It shows the KDE password dialog on the desktop for the user to
+type the administrator password, with no phone involved:
+
+```sh
+SUDO_ASKPASS=/usr/bin/ksshaskpass sudo -A <exact root command> < /dev/null
+```
+
+- No `script` wrapper: without a terminal Navi does not offer the phone, so sudo goes
+  straight to the password, asked by `ksshaskpass`. The output and the real exit
+  status come back as usual.
+- Tell the user first that the phone is unreachable and a password dialog is coming.
+- If the user cancels the dialog or the password fails, stop and report it. Do not
+  retry and do not switch to another route.
+- Use this form only after an `unreachable` outcome (or when the user asks for it),
+  never as a first choice and never after a rejection or a timeout.
+
+## Preserve the installed phone path
+
+- The phone and desktop enrollment already work. Do not rebuild or re-enroll the
+  phone, rotate keys, change PAM, sudoers or Navi settings, or install another root
+  service to solve an ordinary elevation request.
+- Use the real desktop session environment; do not manufacture another user's
+  session environment.
+
+## Package operations and handoffs
+
+Use the Gentoo workflow: inspect and accept the exact Portage plan before merging.
+For an already accepted plan, run emerge noninteractively through the sudo form
+(`emerge … --ask=n`), with output capture. Do not run `emerge --ask` behind it.
+
+When writing an installer or administrative script, make its local elevation path
+this sudo form, or require the caller to launch it that way. Inspect existing
+scripts for internal pkexec/kdesu/sudo calls before running them. Preserve their
+review and content-verification checks when adapting them.
+
+Carry this policy into agent handoffs, generated command examples and new local
+agent configurations. After a session restart or compaction, reload the policy
+before the next privileged action.

@@ -33,13 +33,16 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 
-PROTOCOL = "navi-remote/v1"
+# v2: requests carry the standard signed envelope (dictionary-compressed payload, certificates by hash).
+# The protocol name is part of every message's AES-GCM associated data, so v1 and v2 peers cannot read
+# each other's messages. Key and topic derivation keep their fixed v1 labels: no new setup is needed.
+PROTOCOL = "navi-remote/v2"
 INTERPRETER = "/usr/bin/python3"
 DEFAULT_SERVER = "https://ntfy.sh"
 TO_PHONE = "to-phone"
 TO_COMPUTER = "to-computer"
 INLINE_LIMIT = 3800          # ntfy message bodies above 4096 bytes become attachments
-MAX_PLAIN = 65536            # inflated message cap
+MAX_PLAIN = 131072           # inflated message cap (a signed request may be up to 128 KiB before compression)
 MAX_BLOB = 98304             # encrypted message / attachment cap
 MAX_LINE = 262144            # one JSON line from the ntfy stream or the worker
 RPC_SECONDS = 15
@@ -428,19 +431,15 @@ class RemotePhone:
 
     def adopt_request(self, value):
         self.request = value
-        self.raw = self.crypto.unb64(value["payload_b64"])
+        self.raw = self.crypto.payload_bytes(value)
         self.request_id = json.loads(self.raw)["request_id"]
 
     def write(self, name, value):
         channel = self._channel()
         if name == "request.json":
             self.adopt_request(value)
-            if not self.raw.isascii():
-                raise ValueError("Signed payload must be canonical ASCII JSON")
-            message = {"name": name, "request_id": self.request_id,
-                       "value": {"payload_json": self.raw.decode("ascii"), "signature_b64": value["signature_b64"],
-                                 "machine_certificate_b64": value["machine_certificate_b64"],
-                                 "phone_certificate_b64": value["phone_certificate_b64"]}}
+            # The same envelope as on KDE Connect and the direct network route, unchanged.
+            message = {"name": name, "request_id": self.request_id, "value": value}
         elif name in ("receipt.json", "cancel.json"):
             if self.raw is None:
                 raise ValueError("A terminal message requires its original signed request")
@@ -468,10 +467,13 @@ class RemotePhone:
             elif message.get("name") == "response.json" and self.response is None:
                 status = message.get("status")
                 if status == "signed":
+                    # Navi answers with its signature only; rebuild the response around the request we sent.
                     response = {"request_id": self.request_id, "status": "signed",
                                 "payload_b64": self.crypto.b64(self.raw),
-                                "signature_b64": message.get("signature_b64"),
-                                "phone_certificate_b64": self.request["phone_certificate_b64"]}
+                                "signature_b64": message.get("signature_b64")}
+                    for field in ("phone_certificate_sha256", "phone_certificate_b64"):
+                        if field in self.request:
+                            response[field] = self.request[field]
                     if "phone_ecdh_spki_b64" in message:
                         response["phone_ecdh_spki_b64"] = message["phone_ecdh_spki_b64"]
                     self.response = response
@@ -510,6 +512,8 @@ class RoutedPhone:
         raise AttributeError("transport")
 
     def _use_remote(self, reason):
+        if self._make_remote is None:
+            raise ConnectionError("Remote approvals over ntfy are not set up for this phone")
         if self.remote is None:
             remote = self._make_remote()
             try:
@@ -559,7 +563,7 @@ class RoutedPhone:
     def write(self, name, value):
         if name == "request.json":
             self._request = value
-        if self.route == "primary":
+        if self.route != "remote":
             try:
                 return self.primary.write(name, value)
             except Exception as error:
@@ -567,7 +571,7 @@ class RoutedPhone:
         return self.remote.write(name, value)
 
     def read(self, name):
-        if self.route == "primary":
+        if self.route != "remote":
             try:
                 return self.primary.read(name)
             except Exception as error:
@@ -577,7 +581,7 @@ class RoutedPhone:
         return self.remote.read(name)
 
     def notify(self, request_id, canceled=False):
-        if self.route == "primary":
+        if self.route != "remote":
             self.primary.notify(request_id, canceled)
 
     def close(self):
@@ -587,6 +591,87 @@ class RoutedPhone:
                     phone.close()
                 except Exception:
                     pass
+
+
+LAN_PORT = 39841  # Navi's direct local-network listener (NetworkService.PORT)
+
+
+class ChainPhone(RoutedPhone):
+    """Automatic route for one request, decided before it is signed:
+
+    1. KDE Connect discovery gives the phone's current local address. If KDE Connect cannot see
+       the phone, the request goes over ntfy (when set up).
+    2. If Navi's port 39841 accepts a connection there: the direct local-network route
+       (pinned TLS to Navi's listener).
+    3. If the phone is on the network but that port is closed (network authentication off in
+       Navi): KDE Connect messages.
+    4. If the phone does not answer on the network at all (KDE Connect's "reachable" is stale): ntfy.
+
+    Once the request is out, a failing local route still falls back to ntfy (when set up).
+    """
+
+    def __init__(self, addresses, probe, make_lan, make_kde, make_remote=None, log=None):
+        super().__init__(make_kde, make_remote, log)
+        self._addresses, self._lan_probe, self._make_lan = addresses, probe, make_lan
+
+    @property
+    def transport(self):
+        # Only a request carried by KDE Connect binds Navi's reply to the KDE Connect device.
+        if self.route == "kde" and hasattr(self.primary, "transport"):
+            return self.primary.transport
+        raise AttributeError("transport")
+
+    def _try(self, route, make):
+        phone = None
+        try:
+            phone = make()
+            identity = phone.check()
+        except Exception:
+            if phone is not None and hasattr(phone, "close"):
+                try:
+                    phone.close()
+                except Exception:
+                    pass
+            raise
+        self.primary, self.route = phone, route
+        self._log(f"route={route}")
+        return identity
+
+    def check(self):
+        reasons = []
+        try:
+            addresses = self._addresses()
+        except Exception as error:
+            addresses = []
+            reasons.append(f"KDE Connect discovery failed ({type(error).__name__}: {error})")
+        if addresses:
+            state, address = self._lan_probe(addresses)
+        else:
+            state, address = "absent", None
+            if not reasons:
+                reasons.append("KDE Connect cannot see the phone")
+        self._log(f"discovery addresses={','.join(addresses) or '-'} probe={state}")
+        if state == "open":
+            try:
+                return self._try("lan", lambda: self._make_lan(address))
+            except Exception as error:
+                reasons.append(f"local network: {type(error).__name__}: {error}"[:200])
+        elif state == "absent" and addresses:
+            reasons.append("the phone does not answer on the local network")
+        if state in ("open", "present") or self._make_remote is None:
+            try:
+                return self._try("kde", self._make_primary)
+            except Exception as error:
+                reasons.append(f"KDE Connect: {type(error).__name__}: {error}"[:200])
+        reason = "; ".join(reasons)
+        if self._make_remote is None:
+            raise ConnectionError(f"The phone is not reachable ({reason})")
+        try:
+            self._use_remote(reason)
+        except Exception as remote_error:
+            raise ConnectionError(f"The phone is not reachable ({reason}) and remote approvals over ntfy "
+                                  f"failed ({remote_error})") from remote_error
+        return self.remote.identity()
 
 
 if __name__ == "__main__":
