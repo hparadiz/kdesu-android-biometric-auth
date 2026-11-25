@@ -42,6 +42,8 @@ QVariant DeviceModel::data(const QModelIndex &index, int role) const
         return device.remotePhoneUrl;
     case RemoteComputerUrlRole:
         return device.remoteComputerUrl;
+    case RemoteAdminRole:
+        return device.remoteAdmin;
     }
     return {};
 }
@@ -62,6 +64,7 @@ QHash<int, QByteArray> DeviceModel::roleNames() const
         {RemoteRole, "remote"},
         {RemotePhoneUrlRole, "remotePhoneUrl"},
         {RemoteComputerUrlRole, "remoteComputerUrl"},
+        {RemoteAdminRole, "remoteAdmin"},
     };
 }
 
@@ -96,6 +99,7 @@ void DeviceModel::update(const QJsonArray &devices, const QJsonArray &phones, co
         device.remote = object.value(QStringLiteral("remote")).toString();
         device.remotePhoneUrl = object.value(QStringLiteral("remote_phone_url")).toString();
         device.remoteComputerUrl = object.value(QStringLiteral("remote_computer_url")).toString();
+        device.remoteId = object.value(QStringLiteral("remote_id")).toString();
         const QJsonObject phone = phoneByKey.value(device.phoneKeyId);
         if (const qint64 expiry = qint64(phone.value(QStringLiteral("certificate_expires_at_ms")).toDouble())) {
             device.certificateExpiry = QDateTime::fromMSecsSinceEpoch(expiry);
@@ -110,6 +114,17 @@ void DeviceModel::update(const QJsonArray &devices, const QJsonArray &phones, co
                 device.adminState = QStringLiteral("other-device");
             } else if (authorityEnabled && entry.value(QStringLiteral("enabled")).toBool(true)) {
                 device.adminState = QStringLiteral("enabled");
+                // The root copy of the remote settings must match this account's.
+                const QString rootRemote = entry.value(QStringLiteral("remote_id")).toString();
+                if (rootRemote.isEmpty() && device.remoteId.isEmpty()) {
+                    device.remoteAdmin.clear();
+                } else if (rootRemote == device.remoteId) {
+                    device.remoteAdmin = QStringLiteral("same");
+                } else if (device.remoteId.isEmpty()) {
+                    device.remoteAdmin = QStringLiteral("stale");
+                } else {
+                    device.remoteAdmin = QStringLiteral("outdated");
+                }
             } else {
                 device.adminState = QStringLiteral("revoked");
             }

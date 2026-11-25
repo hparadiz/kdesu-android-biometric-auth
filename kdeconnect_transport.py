@@ -267,6 +267,53 @@ class KdeConnectPhone:
                 process.stdout.close()
 
 
+# POSIX access ACL (system.posix_acl_access): u32 version 2, then entries of u16 tag, u16 perm, u32 id.
+ACL_USER_OBJ, ACL_USER, ACL_GROUP_OBJ, ACL_GROUP, ACL_MASK, ACL_OTHER = 1, 2, 4, 8, 16, 32
+ACL_SEARCH = 1  # execute bit on a directory: pass through by exact name, without listing
+
+
+def parse_posix_acl(raw):
+    """[(tag, perm, id)] from a system.posix_acl_access value; ValueError if malformed."""
+    import struct
+    if len(raw) < 4 or (len(raw) - 4) % 8 or struct.unpack_from("<I", raw)[0] != 2:
+        raise ValueError("Malformed access ACL")
+    entries = [struct.unpack_from("<HHI", raw, offset) for offset in range(4, len(raw), 8)]
+    if any(tag not in (ACL_USER_OBJ, ACL_USER, ACL_GROUP_OBJ, ACL_GROUP, ACL_MASK, ACL_OTHER) or perm & ~7
+           for tag, perm, _ in entries):
+        raise ValueError("Malformed access ACL")
+    return entries
+
+
+def acl_is_search_only(entries):
+    """True when nobody but the owner can read or write: named users/groups and the mask may only search."""
+    for tag, perm, _ in entries:
+        if tag in (ACL_GROUP_OBJ, ACL_OTHER) and perm:
+            return False
+        if tag in (ACL_USER, ACL_GROUP, ACL_MASK) and perm & ~ACL_SEARCH:
+            return False
+    return True
+
+
+def private_runtime(fd, info):
+    """The desktop runtime directory admits nobody else, except search-only ACL entries.
+
+    Some setups add an ACL such as user:mpd:--x so a system service can reach one socket (e.g. PipeWire)
+    by name; that shows as a group search bit (the ACL mask) but grants no listing, reading or writing.
+    """
+    if not info.st_mode & 0o077:
+        return True
+    if info.st_mode & 0o067:  # any group read/write, or any bit for others
+        return False
+    try:
+        raw = os.getxattr(fd, "system.posix_acl_access")
+    except OSError:
+        return False  # group search without an ACL: plain group access
+    try:
+        return acl_is_search_only(parse_posix_acl(raw))
+    except ValueError:
+        return False
+
+
 def _spool_file(filename, raw):
     """All filesystem work in this function runs after dropping desktop UID."""
     runtime = os.environ["XDG_RUNTIME_DIR"]
@@ -275,8 +322,9 @@ def _spool_file(filename, raw):
     runtime_fd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         info = os.fstat(runtime_fd)
-        if info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise ValueError("Unsafe desktop runtime directory")
+        if info.st_uid != os.getuid() or not private_runtime(runtime_fd, info):
+            raise ValueError(f"Unsafe desktop runtime directory {runtime} (mode {stat.S_IMODE(info.st_mode):04o}): "
+                             "other users can read or write it")
         try:
             os.mkdir("navi-auth-kdeconnect", 0o700, dir_fd=runtime_fd)
         except FileExistsError:

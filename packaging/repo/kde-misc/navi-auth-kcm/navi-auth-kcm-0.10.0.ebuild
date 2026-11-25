@@ -16,7 +16,7 @@ DEPEND="dev-qt/qtbase:6[dbus,gui]
     kde-frameworks/kcoreaddons:6
     kde-frameworks/ki18n:6"
 RDEPEND="${DEPEND}
-    =sys-auth/navi-auth-${PV}
+    >=sys-auth/navi-auth-${PV}
     kde-frameworks/kirigami:6
     kde-misc/kdeconnect"
 BDEPEND="kde-frameworks/extra-cmake-modules:0"

@@ -244,16 +244,16 @@ location = /var/db/repos/kdesu-biometric-source/packaging/kde-repo
 masters = gentoo
 auto-sync = no
 EOF
-ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.9.0.ebuild manifest
-ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/kde-misc/navi-auth-kcm/navi-auth-kcm-0.9.0.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.10.0.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/kde-misc/navi-auth-kcm/navi-auth-kcm-0.10.0.ebuild manifest
 ebuild /var/db/repos/kdesu-biometric-source/packaging/kde-repo/kde-plasma/kdesu-gui/kdesu-gui-6.8.2-r1.ebuild manifest
 # Keep Plasma upgrades from silently replacing the Navi-patched kdesu with Gentoo's:
 # a newer Plasma then stops with a conflict until a refreshed kdesu-gui ebuild exists.
 install -d -m 0755 /etc/portage/package.mask
 echo 'kde-plasma/kdesu-gui::gentoo' > /etc/portage/package.mask/navi-kdesu
 emerge --pretend --verbose --oneshot \
-  '=sys-auth/navi-auth-0.9.0::navi-auth-local' \
-  '=kde-misc/navi-auth-kcm-0.9.0::navi-auth-local' \
+  '=sys-auth/navi-auth-0.10.0::navi-auth-local' \
+  '=kde-misc/navi-auth-kcm-0.10.0::navi-auth-local' \
   '=kde-plasma/kdesu-gui-6.8.2-r1::navi-kde-local'
 ```
 
@@ -264,8 +264,8 @@ After accepting the exact plan:
 
 ```sh
 emerge --ask=n --oneshot --usepkg=n --getbinpkg=n --autounmask=n \
-  '=sys-auth/navi-auth-0.9.0::navi-auth-local' \
-  '=kde-misc/navi-auth-kcm-0.9.0::navi-auth-local' \
+  '=sys-auth/navi-auth-0.10.0::navi-auth-local' \
+  '=kde-misc/navi-auth-kcm-0.10.0::navi-auth-local' \
   '=kde-plasma/kdesu-gui-6.8.2-r1::navi-kde-local'
 ```
 

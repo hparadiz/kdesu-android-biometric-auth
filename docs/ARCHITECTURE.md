@@ -210,11 +210,16 @@ is outside this published deployed snapshot.
 ## Remote approvals (ntfy fallback)
 
 `ntfy_transport.py` adds an optional route for phones KDE Connect cannot see
-(details and threat model in [Remote approvals](REMOTE.md)). `RoutedPhone` wraps
-the normal transport: its `check()` runs the existing reachability test
-(`KdeConnectPhone.check()` / `kdeconnect_endpoint()`); on failure, or when
-delivery on the normal route raises, the same signed messages go over ntfy
-instead. Nothing is published to ntfy while KDE Connect sees the phone.
+(details and threat model in [Remote approvals](REMOTE.md)). For KDE Connect
+phones `ChainPhone` decides each request's route before signing it: KDE Connect
+discovery (`kdeconnect_lan_addresses()`), then a TCP probe of Navi's port 39841
+(`lan_probe()`). The port open selects the direct pinned-TLS route
+(`NetworkPhone`); the phone present with the port closed selects KDE Connect
+messages; KDE Connect not seeing the phone, or nothing answering, selects ntfy.
+A local route that fails after the choice falls back to ntfy. Only a request
+carried by KDE Connect binds Navi's reply to the KDE Connect device. Explicit
+test routes (`--kdeconnect-messages`, `--kdeconnect-device`, `--remote-only`)
+use `RoutedPhone` or a single transport.
 
 - Setup is a `remote-setup` request over the normal route. The computer's
   ephemeral P-256 key is inside the signed payload; Navi signs

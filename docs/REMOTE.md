@@ -8,18 +8,25 @@ different Wi-Fi.
 
 ## When it is used
 
-Before every request the computer asks KDE Connect whether the phone is
-reachable on the local network:
+Administrator prompts (kdesu) and **Send Test → Automatic** choose the route
+per request, before it is signed:
 
-| KDE Connect sees the phone | Remote approvals set up | Route |
-| --- | --- | --- |
-| yes | either | KDE Connect messages or direct network, as before; nothing goes to ntfy |
-| no | yes | ntfy |
-| yes, but delivery fails (Wi-Fi just dropped) | yes | ntfy |
-| no | no | the request fails, as before |
+1. **KDE Connect discovery** gives the phone's current local address. If KDE
+   Connect cannot see the phone, the request goes over **ntfy**.
+2. If Navi's port **39841** accepts a connection at that address, the request uses
+   the **direct local network** route (Navi's pinned connection; needs
+   *Enable network authentication* in Navi).
+3. If the phone answers on the network but that port is closed, it uses
+   **KDE Connect messages**; if that attempt fails, **ntfy**.
+4. If nothing answers at that address (KDE Connect's "reachable" can lag after the
+   phone leaves Wi-Fi), **ntfy**.
 
-Navi answers on the route the request arrived on. Navi's **Send approval again**
+Nothing is published to ntfy while the phone is reachable locally. Without
+remote approvals set up, steps 1 and 4 fall back to trying KDE Connect, as before.
+Navi answers on the route the request arrived on; its **Send approval again**
 also tries ntfy, which helps if Wi-Fi drops between the request and your fingerprint.
+`journalctl -t navi-auth` shows each decision (`discovery addresses=… probe=…`,
+`route=lan|kde|ntfy`).
 
 ## Setting it up
 

@@ -207,7 +207,10 @@ void NaviAuthKcm::sendTest(const QString &deviceId, const QString &transport)
     // pinned TLS connection, the same route kdesu uses with the LAN transport. Remote: ntfy only.
     m_testTransport = transport;
     const bool network = transport == QLatin1String("network");
-    QStringList arguments{QStringLiteral("authenticate"), network ? QStringLiteral("--kdeconnect-device") : QStringLiteral("--kdeconnect-messages"),
+    // Automatic: the same order administrator prompts use (local network, KDE Connect messages, ntfy).
+    const QString routeOption = transport == QLatin1String("auto") ? QStringLiteral("--device")
+        : network ? QStringLiteral("--kdeconnect-device") : QStringLiteral("--kdeconnect-messages");
+    QStringList arguments{QStringLiteral("authenticate"), routeOption,
                           deviceId, QStringLiteral("--phone-key-id"), device->phoneKeyId, QStringLiteral("--notification-only"),
                           QStringLiteral("--application"), QStringLiteral("System Settings"), QStringLiteral("--operation"),
                           network ? QStringLiteral("Test network approval from System Settings")
@@ -241,7 +244,8 @@ void NaviAuthKcm::removeRemote(const QString &deviceId)
     if (!device) {
         return;
     }
-    m_updateAdminAfter = device->adminState == QLatin1String("enabled") ? deviceId : QString();
+    // host.py removes the protected administrator copy first itself (no password needed), then this account's.
+    m_updateAdminAfter.clear();
     startTask(QStringLiteral("remote-remove"), deviceId, {QStringLiteral("remote-remove"), QStringLiteral("--kdeconnect-device"), deviceId});
 }
 
@@ -458,6 +462,12 @@ void NaviAuthKcm::taskExited(int exitCode, QProcess::ExitStatus status)
     if (success) {
         if (task == QLatin1String("enroll")) {
             result = i18n("%1 is enrolled. Use “Send test” to try an approval.", m_taskDeviceName);
+        } else if (task == QLatin1String("test") && m_testTransport == QLatin1String("auto")) {
+            result = m_route == QLatin1String("network")
+                ? i18n("%1 approved the test over the direct local network (Navi's connection).", m_taskDeviceName)
+                : m_route == QLatin1String("ntfy")
+                ? i18n("%1 approved the test over ntfy (not reachable on the local network).", m_taskDeviceName)
+                : i18n("%1 approved the test over KDE Connect messages (Navi's network connection is off).", m_taskDeviceName);
         } else if (task == QLatin1String("test")) {
             result = m_route == QLatin1String("ntfy") && m_testTransport != QLatin1String("remote")
                 ? i18n("%1 approved the test over ntfy (KDE Connect couldn't see the phone) with a verified signature.", m_taskDeviceName)
@@ -503,8 +513,7 @@ void NaviAuthKcm::taskExited(int exitCode, QProcess::ExitStatus status)
     }
     m_route.clear();
     const QString updateAdmin = std::exchange(m_updateAdminAfter, QString());
-    if ((task == QLatin1String("remote-setup") || task == QLatin1String("remote-remove")) && success && updateAdmin == deviceId
-        && canEnableAdministratorPrompts()) {
+    if (task == QLatin1String("remote-setup") && success && updateAdmin == deviceId && canEnableAdministratorPrompts()) {
         // Copy the changed remote settings into the protected administrator entry (password prompt).
         setMessages(QString(), result);
         Q_EMIT taskChanged();
