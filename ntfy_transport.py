@@ -510,6 +510,8 @@ class RoutedPhone:
         raise AttributeError("transport")
 
     def _use_remote(self, reason):
+        if self._make_remote is None:
+            raise ConnectionError("Remote approvals over ntfy are not set up for this phone")
         if self.remote is None:
             remote = self._make_remote()
             try:
@@ -559,7 +561,7 @@ class RoutedPhone:
     def write(self, name, value):
         if name == "request.json":
             self._request = value
-        if self.route == "primary":
+        if self.route != "remote":
             try:
                 return self.primary.write(name, value)
             except Exception as error:
@@ -567,7 +569,7 @@ class RoutedPhone:
         return self.remote.write(name, value)
 
     def read(self, name):
-        if self.route == "primary":
+        if self.route != "remote":
             try:
                 return self.primary.read(name)
             except Exception as error:
@@ -577,7 +579,7 @@ class RoutedPhone:
         return self.remote.read(name)
 
     def notify(self, request_id, canceled=False):
-        if self.route == "primary":
+        if self.route != "remote":
             self.primary.notify(request_id, canceled)
 
     def close(self):
@@ -587,6 +589,87 @@ class RoutedPhone:
                     phone.close()
                 except Exception:
                     pass
+
+
+LAN_PORT = 39841  # Navi's direct local-network listener (NetworkService.PORT)
+
+
+class ChainPhone(RoutedPhone):
+    """Automatic route for one request, decided before it is signed:
+
+    1. KDE Connect discovery gives the phone's current local address. If KDE Connect cannot see
+       the phone, the request goes over ntfy (when set up).
+    2. If Navi's port 39841 accepts a connection there: the direct local-network route
+       (pinned TLS to Navi's listener).
+    3. If the phone is on the network but that port is closed (network authentication off in
+       Navi): KDE Connect messages.
+    4. If the phone does not answer on the network at all (KDE Connect's "reachable" is stale): ntfy.
+
+    Once the request is out, a failing local route still falls back to ntfy (when set up).
+    """
+
+    def __init__(self, addresses, probe, make_lan, make_kde, make_remote=None, log=None):
+        super().__init__(make_kde, make_remote, log)
+        self._addresses, self._lan_probe, self._make_lan = addresses, probe, make_lan
+
+    @property
+    def transport(self):
+        # Only a request carried by KDE Connect binds Navi's reply to the KDE Connect device.
+        if self.route == "kde" and hasattr(self.primary, "transport"):
+            return self.primary.transport
+        raise AttributeError("transport")
+
+    def _try(self, route, make):
+        phone = None
+        try:
+            phone = make()
+            identity = phone.check()
+        except Exception:
+            if phone is not None and hasattr(phone, "close"):
+                try:
+                    phone.close()
+                except Exception:
+                    pass
+            raise
+        self.primary, self.route = phone, route
+        self._log(f"route={route}")
+        return identity
+
+    def check(self):
+        reasons = []
+        try:
+            addresses = self._addresses()
+        except Exception as error:
+            addresses = []
+            reasons.append(f"KDE Connect discovery failed ({type(error).__name__}: {error})")
+        if addresses:
+            state, address = self._lan_probe(addresses)
+        else:
+            state, address = "absent", None
+            if not reasons:
+                reasons.append("KDE Connect cannot see the phone")
+        self._log(f"discovery addresses={','.join(addresses) or '-'} probe={state}")
+        if state == "open":
+            try:
+                return self._try("lan", lambda: self._make_lan(address))
+            except Exception as error:
+                reasons.append(f"local network: {type(error).__name__}: {error}"[:200])
+        elif state == "absent" and addresses:
+            reasons.append("the phone does not answer on the local network")
+        if state in ("open", "present") or self._make_remote is None:
+            try:
+                return self._try("kde", self._make_primary)
+            except Exception as error:
+                reasons.append(f"KDE Connect: {type(error).__name__}: {error}"[:200])
+        reason = "; ".join(reasons)
+        if self._make_remote is None:
+            raise ConnectionError(f"The phone is not reachable ({reason})")
+        try:
+            self._use_remote(reason)
+        except Exception as remote_error:
+            raise ConnectionError(f"The phone is not reachable ({reason}) and remote approvals over ntfy "
+                                  f"failed ({remote_error})") from remote_error
+        return self.remote.identity()
 
 
 if __name__ == "__main__":

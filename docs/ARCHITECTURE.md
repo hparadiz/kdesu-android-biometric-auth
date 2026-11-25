@@ -109,8 +109,11 @@ the original decoded bytes rather than reserializing received objects.
 
 Requests bind request ID, random 256-bit nonce, machine/phone key IDs, approved
 certificate hash, operation, issue/expiry times and display context. Privileged
-requests additionally bind the exact `/bin/sh -c` command, target credentials,
-held working-directory inode, restricted environment and desktop dialog ID.
+requests additionally bind `execution` (`"shell": "/bin/sh -c"`, target credentials,
+held working-directory inode, restricted environment) and the desktop dialog ID.
+The command itself is carried once, as the signed `context.command`: it is what Navi
+shows and exactly what the authority runs with `/bin/sh -c`. Navi rejects a request
+that still carries an older `argv` copy, so mismatched versions fail closed.
 Approval and commit share a 120-second deadline. SQLite consumes each pending
 proof once. A certificate by itself is not a reusable authentication token.
 
@@ -158,8 +161,21 @@ launch only. The native helper has a 180-second maximum lifetime; KDE has a
 separate 20-second postcommit acknowledgement deadline.
 
 The authority accepts one configured desktop UID and root as target, one active
-request at a time, printable commands up to 512 characters, normal scheduling,
-visible commands and nonterminal execution. `kdesu -t` and `-d` are ineligible.
+request at a time, printable commands up to `MAX_COMMAND` characters (default
+10240, set at install with `make install MAX_COMMAND=N` or the ebuild's
+`NAVI_AUTH_MAX_COMMAND`), normal scheduling, visible commands and nonterminal
+execution. Newlines and tabs are allowed in commands; other control
+characters, carriage returns and bidirectional overrides are not. kdesu itself
+refuses any command with a newline or tab before it starts authentication ("It
+contains invalid characters"), so kdesu commands are single-line. `kdesu -t` and `-d` are
+ineligible. Navi's own limit is set when it is built (`NAVI_MAX_COMMAND` for
+`./build.sh`) and must be at least the computer's.
+
+Navi shows the full command. Longer than 512 characters or 12 rows, it is collapsed
+and a tap expands it. The formatted view numbers real lines and adds marked display
+breaks after top-level `&&`, `||`, `;` and `|` (never inside quotes, `$(…)` or
+backticks), with tabs as four spaces; **Exact** shows the text as signed, tabs as
+`⇥`. These are display choices only.
 
 ## Trust, revocation and records
 
@@ -210,11 +226,16 @@ is outside this published deployed snapshot.
 ## Remote approvals (ntfy fallback)
 
 `ntfy_transport.py` adds an optional route for phones KDE Connect cannot see
-(details and threat model in [Remote approvals](REMOTE.md)). `RoutedPhone` wraps
-the normal transport: its `check()` runs the existing reachability test
-(`KdeConnectPhone.check()` / `kdeconnect_endpoint()`); on failure, or when
-delivery on the normal route raises, the same signed messages go over ntfy
-instead. Nothing is published to ntfy while KDE Connect sees the phone.
+(details and threat model in [Remote approvals](REMOTE.md)). For KDE Connect
+phones `ChainPhone` decides each request's route before signing it: KDE Connect
+discovery (`kdeconnect_lan_addresses()`), then a TCP probe of Navi's port 39841
+(`lan_probe()`). The port open selects the direct pinned-TLS route
+(`NetworkPhone`); the phone present with the port closed selects KDE Connect
+messages; KDE Connect not seeing the phone, or nothing answering, selects ntfy.
+A local route that fails after the choice falls back to ntfy. Only a request
+carried by KDE Connect binds Navi's reply to the KDE Connect device. Explicit
+test routes (`--kdeconnect-messages`, `--kdeconnect-device`, `--remote-only`)
+use `RoutedPhone` or a single transport.
 
 - Setup is a `remote-setup` request over the normal route. The computer's
   ephemeral P-256 key is inside the signed payload; Navi signs

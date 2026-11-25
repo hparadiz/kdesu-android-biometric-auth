@@ -38,6 +38,11 @@ SDK installation requires accepting Google's SDK licenses; the build itself is
 offline once these components are installed. See the official
 [sdkmanager documentation](https://developer.android.com/tools/sdkmanager).
 
+The longest command Navi accepts for review defaults to 10240 characters. To change
+it, build with `NAVI_MAX_COMMAND=N ./build.sh release` (512-16384). It must be at
+least the computer's limit (next sections), or Navi rejects longer requests as
+invalid.
+
 `--new-key` creates `build/debug.keystore` and refuses to run if one exists.
 **Keep this private key and back it up securely.** The historical script uses the
 standard development alias/password, so filesystem protection is what protects
@@ -244,16 +249,19 @@ location = /var/db/repos/kdesu-biometric-source/packaging/kde-repo
 masters = gentoo
 auto-sync = no
 EOF
-ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.9.0.ebuild manifest
-ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/kde-misc/navi-auth-kcm/navi-auth-kcm-0.9.0.ebuild manifest
+# Optional: a command limit other than 10240 characters (must not exceed Navi's):
+#   echo 'NAVI_AUTH_MAX_COMMAND=4096' > /etc/portage/env/navi-auth.conf
+#   echo 'sys-auth/navi-auth navi-auth.conf' >> /etc/portage/package.env
+ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/sys-auth/navi-auth/navi-auth-0.11.0.ebuild manifest
+ebuild /var/db/repos/kdesu-biometric-source/packaging/repo/kde-misc/navi-auth-kcm/navi-auth-kcm-0.10.0.ebuild manifest
 ebuild /var/db/repos/kdesu-biometric-source/packaging/kde-repo/kde-plasma/kdesu-gui/kdesu-gui-6.8.2-r1.ebuild manifest
 # Keep Plasma upgrades from silently replacing the Navi-patched kdesu with Gentoo's:
 # a newer Plasma then stops with a conflict until a refreshed kdesu-gui ebuild exists.
 install -d -m 0755 /etc/portage/package.mask
 echo 'kde-plasma/kdesu-gui::gentoo' > /etc/portage/package.mask/navi-kdesu
 emerge --pretend --verbose --oneshot \
-  '=sys-auth/navi-auth-0.9.0::navi-auth-local' \
-  '=kde-misc/navi-auth-kcm-0.9.0::navi-auth-local' \
+  '=sys-auth/navi-auth-0.11.0::navi-auth-local' \
+  '=kde-misc/navi-auth-kcm-0.10.0::navi-auth-local' \
   '=kde-plasma/kdesu-gui-6.8.2-r1::navi-kde-local'
 ```
 
@@ -264,8 +272,8 @@ After accepting the exact plan:
 
 ```sh
 emerge --ask=n --oneshot --usepkg=n --getbinpkg=n --autounmask=n \
-  '=sys-auth/navi-auth-0.9.0::navi-auth-local' \
-  '=kde-misc/navi-auth-kcm-0.9.0::navi-auth-local' \
+  '=sys-auth/navi-auth-0.11.0::navi-auth-local' \
+  '=kde-misc/navi-auth-kcm-0.10.0::navi-auth-local' \
   '=kde-plasma/kdesu-gui-6.8.2-r1::navi-kde-local'
 ```
 
@@ -361,8 +369,9 @@ Do not add `-t` or `-d`: terminal or hidden-command requests are ineligible.
 
 For commands that invoke scripts, approval of a path does not freeze its contents.
 Execute the same verified bytes or a protected snapshot. Hashing and subsequently
-reopening a writable path leaves a race. Keep commands within 512 characters and
-preserve the exact command for review; do not hide large payloads in encodings.
+reopening a writable path leaves a race. Keep commands within the configured limit
+(10240 characters by default) and preserve the exact command for review; do not hide
+large payloads in encodings. Long work reads better split into several requests.
 
 ## Revocation, removal and recovery
 

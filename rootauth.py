@@ -93,10 +93,9 @@ def private_directory(path, mode):
         raise ValueError(f"Expected root-owned directory with mode {mode:o}: {path}")
 
 
-def plain(value, limit, field, empty=False):
-    if not isinstance(value, str) or len(value) > limit or (not value and not empty) or any(
-            ord(c) < 32 or 0x7f <= ord(c) <= 0x9f or 0x202a <= ord(c) <= 0x202e
-            or 0x2066 <= ord(c) <= 0x2069 or 0xd800 <= ord(c) <= 0xdfff for c in value):
+def plain(value, limit, field, empty=False, allow_layout=False):
+    """Printable text; allow_layout additionally permits newlines and tabs (commands only)."""
+    if not crypto.check_layout_text(value, limit, allow_layout) or (not value and not empty):
         raise ValueError(f"Invalid {field}")
     return value
 
@@ -123,8 +122,8 @@ def validate_start(event, peer_uid, account):
         raise ValueError("Requesting UID does not match the invoking account")
     if supplied.get("requesting_user") != account.pw_name:
         raise ValueError("Requesting account does not match the invoking account")
-    context = {name: plain(supplied.get(name, ""), limit, name, empty)
-               for name, limit, empty in (("application", 80, False), ("command", 512, False),
+    context = {name: plain(supplied.get(name, ""), limit, name, empty, allow_layout=name == "command")
+               for name, limit, empty in (("application", 80, False), ("command", crypto.MAX_COMMAND, False),
                    ("icon_name", 128, True), ("requester_executable", 4096, True))}
     encoded = supplied.get("icon_png_base64", "")
     if not isinstance(encoded, str) or len(encoded) > 21848:
@@ -234,6 +233,26 @@ def revoke_for_device(uid, event):
         audit("phone-authority-revoked uid=" + str(uid))
 
 
+def remote_off_for_device(uid, event):
+    """Remove remote approvals (ntfy) from the caller's own device entry; like revocation it needs no password."""
+    if set(event) != {"protocol", "event", "request_id", "kdeconnect_device"} or event["event"] != "remote-off":
+        raise ValueError("Invalid remote-off request")
+    with commit_guard():
+        config = json.loads(trusted_file(CONFIG, True), object_pairs_hook=unique_object)
+        if uid == 0 or config.get("uid") != uid:
+            raise ValueError("Request does not match the invoking account and device")
+        entries = phone_entries(config)
+        matching = [entry for entry in entries if entry.get("kdeconnect_device") == event["kdeconnect_device"]]
+        if not matching:
+            raise ValueError("Request does not match an enrolled device")
+        for entry in matching:
+            entry.pop("remote", None)
+        config = dict(enabled=config.get("enabled", True), uid=config["uid"],
+                      machine_key_id=config["machine_key_id"], phones=entries)
+        crypto.atomic_write(CONFIG, crypto.encode(config))
+        audit("phone-remote-off uid=" + str(uid))
+
+
 def authority_status(uid, event):
     """Read-only summary for the invoking account; never exposes logs, executions or certificates."""
     if set(event) != {"protocol", "event", "request_id"} or event["event"] != "status":
@@ -257,7 +276,9 @@ def authority_status(uid, event):
                 pass
             phones.append(dict(phone_key_id=entry["phone_key_id"], enabled=entry.get("enabled", True),
                                transport=entry.get("transport"), kdeconnect_device=entry.get("kdeconnect_device"),
-                               remote=(entry.get("remote") or {}).get("server"), certificate_expires=expires))
+                               remote=(entry.get("remote") or {}).get("server"),
+                               remote_id=crypto.remote_id((entry.get("remote") or {}).get("phone_topic")),
+                               certificate_expires=expires))
     return dict(configured=True, valid=True, account_matches=matches,
                 enabled=bool(config.get("enabled", True)) if matches else None,
                 machine_key_id=config.get("machine_key_id") if matches else None, phones=phones)
@@ -339,23 +360,32 @@ class PhoneAttempt:
                     self.kdeconnect_device, environment, owner.account, **options)
             return crypto.NetworkPhone(self.config.get("endpoint"), owner.key, owner.root, self.leaf, resolver)
 
-        if self.remote is None:
-            return make_primary()
         module = crypto.remote_module()
-        probe = None
+        log = lambda message: audit(f"phone-route phone={self.phone_key_id} {message}")
+        make_remote = None
+        if self.remote is not None:
+            make_remote = lambda: module.RemotePhone(crypto, self.remote, owner.key, owner.root, self.leaf, owner.account)
         if self.kde_messages:
-            # KDE Connect's "reachable" can be stale after Wi-Fi drops: confirm the phone answers.
-            probe = lambda: crypto.lan_present(crypto.kdeconnect_addresses(self.kdeconnect_device, environment, owner.account))
-        routed = module.RoutedPhone(
-            make_primary,
-            lambda: module.RemotePhone(crypto, self.remote, owner.key, owner.root, self.leaf, owner.account),
-            log=lambda message: audit(f"phone-route phone={self.phone_key_id} {message}"), probe=probe)
+            # Automatic route: local network (address from KDE Connect discovery, Navi's port 39841),
+            # then KDE Connect messages, then ntfy when KDE Connect cannot see the phone or delivery fails.
+            device = self.kdeconnect_device
+
+            def make_lan(address):
+                resolver = lambda **options: crypto.kdeconnect_endpoint(device, environment, owner.account, **options)
+                return crypto.NetworkPhone(f"{address}:{crypto.PHONE_PORT}", owner.key, owner.root, self.leaf, resolver)
+
+            phone = module.ChainPhone(lambda: crypto.kdeconnect_lan_addresses(device, environment, owner.account),
+                                      crypto.lan_probe, make_lan, make_primary, make_remote, log)
+        elif make_remote is not None:
+            phone = module.RoutedPhone(make_primary, make_remote, log)
+        else:
+            return make_primary()
         try:
-            routed.check()
+            phone.check()
         except BaseException:
-            routed.close()
+            phone.close()
             raise
-        return routed
+        return phone
 
     async def deliver(self, filename, value, canceled=False):
         await asyncio.to_thread(self.phone.write, filename, value)
@@ -378,7 +408,7 @@ class PhoneAttempt:
                 operation="Run this command as root", issued_at_ms=now,
                 expires_at_ms=now + int((deadline - time.monotonic()) * 1000),
                 context=context, execution=execution)
-            if self.kde_messages and hasattr(self.phone, "transport"):
+            if hasattr(self.phone, "transport"):  # Only when the request travels through KDE Connect.
                 self.payload["transport"] = self.phone.transport
             if self.remote is not None:
                 self.payload["remote"] = {"kind": "ntfy"}
@@ -390,13 +420,15 @@ class PhoneAttempt:
             self.request = crypto.envelope(owner.key, self.payload)
             self.request.update(machine_certificate_b64=crypto.b64(owner.root.public_bytes(crypto.serialization.Encoding.DER)),
                                 phone_certificate_b64=crypto.b64(leaf_der))
+            crypto.check_message_size(self.request)
             with owner.db:
                 owner.db.execute("INSERT INTO requests VALUES(?,?,?,'pending')",
                                  (self.request_id, desktop_id, crypto.encode(self.payload)))
             self.delivery_started = True
             await self.deliver("request.json", self.request)
             self.delivered = True
-            route = "ntfy" if getattr(self.phone, "route", None) == "remote" else "kdeconnect" if self.kde_messages else "lan"
+            route = {"remote": "ntfy", "kde": "kdeconnect", "lan": "network"}.get(
+                getattr(self.phone, "route", None), "kdeconnect" if self.kde_messages else "network")
             audit(f"requested request={self.request_id} desktop={desktop_id} phone={self.phone_key_id} route={route}")
             while not self.stopping.is_set() and time.monotonic() < deadline:
                 value = await asyncio.to_thread(self.phone.read, "response.json")
@@ -495,7 +527,8 @@ class Authority:
             cwd_fd = os.open(cwd, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
             cwd = os.readlink(f"/proc/self/fd/{cwd_fd}")
             cwd_info = os.fstat(cwd_fd)
-            execution = {"argv": ["/bin/sh", "-c", context["command"]], "uid": 0, "gid": 0,
+            # The signed context.command is the one copy of the command: it is shown and it is what runs.
+            execution = {"shell": "/bin/sh -c", "uid": 0, "gid": 0,
                          "cwd": cwd, "cwd_device": cwd_info.st_dev, "cwd_inode": cwd_info.st_ino, "environment": environment}
             pending = {}
             for attempt in self.attempts:
@@ -664,6 +697,10 @@ async def run_stdio(uid):
             return
         if event.get("event") == "status":
             await send(writer, "status", event["request_id"], **authority_status(uid, event))
+            return
+        if event.get("event") == "remote-off":
+            remote_off_for_device(uid, event)
+            await send(writer, "remote-off", event["request_id"])
             return
         with (STATE / "authority.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

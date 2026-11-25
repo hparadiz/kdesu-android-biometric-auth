@@ -124,6 +124,7 @@ KCM.ScrollViewKCM {
             required property string remote
             required property string remotePhoneUrl
             required property string remoteComputerUrl
+            required property string remoteAdmin
             readonly property string remoteHost: remote.replace(/^https?:\/\//, "").replace(/\/$/, "")
 
             width: ListView.view.width
@@ -186,6 +187,38 @@ KCM.ScrollViewKCM {
                         opacity: 0.7
                         font: Kirigami.Theme.smallFont
                     }
+                    // The protected copy used by administrator prompts no longer matches this account's remote approvals.
+                    RowLayout {
+                        visible: card.enrolled && (card.remoteAdmin === "stale" || card.remoteAdmin === "outdated")
+                        spacing: Kirigami.Units.smallSpacing
+                        Kirigami.Icon {
+                            source: "data-warning"
+                            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                        }
+                        QQC2.Label {
+                            Layout.fillWidth: true
+                            text: card.remoteAdmin === "stale"
+                                ? i18n("Administrator prompts still use remote approvals that were turned off")
+                                : i18n("Administrator prompts don't have the current remote approval settings")
+                            wrapMode: Text.WordWrap
+                            font: Kirigami.Theme.smallFont
+                            color: Kirigami.Theme.neutralTextColor
+                        }
+                        QQC2.Button {
+                            text: card.remoteAdmin === "stale" ? i18nc("@action:button", "Turn Off")
+                                                              : i18nc("@action:button", "Update")
+                            font: Kirigami.Theme.smallFont
+                            enabled: !kcm.busy && (card.remoteAdmin === "stale" || kcm.canEnableAdministratorPrompts)
+                            onClicked: card.remoteAdmin === "stale" ? kcm.removeRemote(card.deviceId)
+                                                                    : kcm.enableAdministratorPrompts(card.deviceId)
+                            QQC2.ToolTip.text: card.remoteAdmin === "stale"
+                                ? i18n("Removes the old remote approval settings from administrator prompts. No password needed.")
+                                : i18n("Copies this phone's current remote approval settings to administrator prompts. Asks for the administrator password.")
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        }
+                    }
                     RowLayout {
                         visible: card.enrolled && kcm.authorityAvailable && kcm.authorityProblem.length === 0
                         spacing: Kirigami.Units.smallSpacing
@@ -242,11 +275,17 @@ KCM.ScrollViewKCM {
                     // With remote approvals a phone KDE Connect can't see is still reachable over ntfy.
                     enabled: !kcm.busy && (card.usable || card.remote.length > 0)
                     onClicked: testMenu.popup(this, 0, height)
-                    QQC2.ToolTip.text: i18n("Ask the phone for a fingerprint approval without running anything. Choose how the request travels: as signed files through KDE Connect (or over ntfy when remote approvals are on and KDE Connect can't see the phone), over Navi's direct network connection (needs Enable network authentication in Navi → ☰ → Settings), or over ntfy only.")
+                    QQC2.ToolTip.text: i18n("Ask the phone for a fingerprint approval without running anything. Automatic uses the same order as administrator prompts: Navi's direct local-network connection (found through KDE Connect, port 39841), then KDE Connect messages, then ntfy when KDE Connect can't reach the phone. The other entries test one route each.")
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                     QQC2.Menu {
                         id: testMenu
+                        QQC2.MenuItem {
+                            text: i18nc("@action:inmenu", "Automatic (like administrator prompts)")
+                            icon.name: "fingerprint"
+                            onTriggered: kcm.sendTest(card.deviceId, "auto")
+                        }
+                        QQC2.MenuSeparator {}
                         QQC2.MenuItem {
                             text: i18nc("@action:inmenu", "Through KDE Connect messages")
                             icon.name: "kdeconnect"
