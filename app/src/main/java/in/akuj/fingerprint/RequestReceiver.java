@@ -51,7 +51,7 @@ public final class RequestReceiver extends BroadcastReceiver {
                 if (cancellation) return;
                 JSONObject response = bridge.read("response.json");
                 if (response != null && request.id.equals(response.optString("request_id"))) return;
-                Bitmap requester = RequesterIcon.decode(request.context);
+                Bitmap requester = RequesterIcon.decode(context, request.context);
                 createChannel(context);
                 Intent open = new Intent(context, MainActivity.class)
                         .setAction("in.akuj.fingerprint.OPEN_REQUEST." + request.id)

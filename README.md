@@ -27,19 +27,28 @@ part of the security boundary.
 
 | Component | Version / purpose |
 | --- | --- |
-| Android application | 0.8.3, API 28+, desk reader mode, non-debuggable release |
-| Host CLI and native/Python authority | 0.7.2 with concurrent enrolled-phone requests |
-| KDE patch and Gentoo packages | kdesu-gui 6.7.2-r3 against kde-cli-tools 6.7.2 |
+| Android application | 0.10.0, API 28+, desk reader mode, code enrollment (KDE Connect, guided destination setup, Downloads on Android 9–10), Settings and Paired computers screens, remote approvals over ntfy, non-debuggable release |
+| Host CLI and native/Python authority | 0.9.0 with code enrollment over KDE Connect, device selection by name, remote approvals over ntfy when KDE Connect can't see the phone, and a warning when kdesu is not Navi-enabled |
+| System Settings page | `kcm_navi_auth` 0.9.0: enroll, status, remote approvals and test (KDE Connect messages, direct network or ntfy) per KDE Connect device |
+| KDE patch and Gentoo packages | kdesu-gui 6.8.2-r1 against kde-cli-tools 6.8.2 (6.7.2-r3 for Plasma 6.7.2) |
 | Direct Wi-Fi transport | Pinned TLS 1.3; restricted TLS 1.2 on Android 9; TCP 39841 |
 | Optional KDE Connect transport | File sharing on Android 10+, or paired-device IP lookup for direct Wi-Fi |
 | Android CI | Builds debug and release modes with a disposable signing key |
 
 The verified phones are a **Pixel 9 Pro** running Android 16 and a **Nexus 6P**
 running an Android 9 ROM. Android 9/API 28 is the minimum; the Nexus's older stock
-firmware is unsupported. Installation and ADB enrollment currently accept Pixel
-and Nexus 6P devices. Other phone models are unverified. The desktop baseline is
+firmware is unsupported. Release enrollment uses a code shown on the computer and
+needs KDE Connect delivery to the phone (Android 10+); the ADB/debug fallback for
+Android 9 accepts Pixel and Nexus 6P devices. Other phone models are unverified.
+**The code enrollment flow and the System Settings page are new and have not yet
+been verified on a physical phone.** The desktop baseline is
 Gentoo with the patched KDE versions above; see the full
 [prerequisites](docs/INSTALL.md#supported-baseline).
+
+When the phone is away from the computer's network (mobile data, other Wi-Fi),
+approvals can travel end-to-end encrypted through an ntfy server instead; see
+[Remote approvals](docs/REMOTE.md). **This route is new and has not yet been
+verified on a physical phone.**
 
 The new dedicated KDE Connect plugin was a separate unfinished experiment. It is
 not needed for this release and is not included as a working feature. Bluetooth
@@ -49,7 +58,7 @@ not implemented. Installing this does not reroute those authentication systems.
 ## Desk reader mode and multiple phones
 
 After enrollment and network setup, enable **Desk reader mode** in the Android
-app and leave Navi open and unlocked. The mode keeps the screen awake while Navi
+app (**☰ → Settings**) and leave Navi open and unlocked. The mode keeps the screen awake while Navi
 is visible. A verified authentication request from a paired computer automatically
 opens the biometric prompt, so a face-down Nexus 6P can work through its rear
 fingerprint sensor alone.
@@ -71,8 +80,8 @@ See [installation](docs/INSTALL.md#6-configure-the-protected-enrollment) for
 
 ## Start here
 
-1. [Build, enroll and install](docs/INSTALL.md): prerequisites, initial ADB trust
-   bootstrap, release update, and desktop deployment.
+1. [Build, enroll and install](docs/INSTALL.md): prerequisites, code enrollment
+   over KDE Connect (or the ADB fallback), and desktop deployment.
 2. [Keep the phone available](docs/BACKGROUND.md): ongoing notification,
    background permissions, restart behavior and recovery.
 3. [Architecture and protocol](docs/ARCHITECTURE.md): keys, exact request binding,
@@ -82,9 +91,15 @@ See [installation](docs/INSTALL.md#6-configure-the-protected-enrollment) for
    [verified behavior](docs/VERIFICATION.md).
 6. [Development and CI](CONTRIBUTING.md), including the existing KDE test suites.
 
-After enrollment, a terminal can trigger a fresh approval:
+After enrollment, open **System Settings → Security & Privacy → Navi
+Authenticator** and press **Send Test**, or trigger a fresh approval from a
+terminal. Without a transport option, `authenticate` uses the enrolled phone's
+KDE Connect pairing and asks which phone to use when there are several:
 
 ```sh
+python3 host.py authenticate --application Terminal --operation 'Verify phone approval'
+
+# Or connect directly over Wi-Fi:
 python3 host.py authenticate --endpoint PHONE_IP:39841 \
   --application Terminal --operation 'Verify phone approval'
 
@@ -126,8 +141,10 @@ plain Java and Android framework APIs. There are no third-party Android runtime
 libraries. Gradle/Android Studio metadata is also included,
 but `build.sh` is the verified route and no Gradle wrapper is bundled.
 
-New enrollment currently requires an explicitly debuggable build and authorized
-ADB. Then install a release build **in place with the same app signing key**.
+A new phone can be enrolled directly on the release build with the pairing code
+(`./build.sh release --new-key` creates the signing key the first time). The ADB
+fallback still requires an explicitly debuggable build; afterwards install a
+release build **in place with the same app signing key**.
 Do not uninstall or clear storage to update an enrolled phone. Each builder owns
 their signing identity; this repository contains no private signing key or pairing
 state. CI artifacts use a new temporary key per run and are disposable build

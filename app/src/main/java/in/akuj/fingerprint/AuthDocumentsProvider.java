@@ -7,6 +7,7 @@ import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.CancellationSignal;
 import android.os.Binder;
+import android.os.Build;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract.Document;
@@ -48,6 +49,9 @@ public final class AuthDocumentsProvider extends DocumentsProvider {
         String[] columns = projection != null ? projection : new String[]{Root.COLUMN_ROOT_ID, Root.COLUMN_DOCUMENT_ID,
             Root.COLUMN_TITLE, Root.COLUMN_SUMMARY, Root.COLUMN_FLAGS, Root.COLUMN_ICON};
         MatrixCursor result = new MatrixCursor(columns);
+        // Android 9 cannot forward other shares to Downloads (MediaStore.Downloads is API 29), so Navi
+        // is not offered as a destination folder there; it only serves its own outgoing replies.
+        if (Build.VERSION.SDK_INT < 29) return result;
         MatrixCursor.RowBuilder row = result.newRow();
         put(row, columns, Root.COLUMN_ROOT_ID, ROOT_ID);
         put(row, columns, Root.COLUMN_DOCUMENT_ID, ROOT_ID);
@@ -67,6 +71,7 @@ public final class AuthDocumentsProvider extends DocumentsProvider {
     @Override public Cursor queryChildDocuments(String parent, String[] projection, String sortOrder) throws FileNotFoundException {
         if (!ROOT_ID.equals(parent)) throw new FileNotFoundException("Unknown folder");
         MatrixCursor result = new MatrixCursor(projection != null ? projection : DOCUMENT_COLUMNS);
+        if (Build.VERSION.SDK_INT < 29) return result;
         // Authentication messages are transient and do not clutter the file browser.
         String[] fields = {MediaStore.Downloads._ID};
         long identity = Binder.clearCallingIdentity();
@@ -85,12 +90,13 @@ public final class AuthDocumentsProvider extends DocumentsProvider {
     }
 
     @Override public String createDocument(String parent, String mime, String name) throws FileNotFoundException {
+        if (Build.VERSION.SDK_INT < 29) throw new FileNotFoundException("Navi is not a destination folder on this Android version");
         if (!ROOT_ID.equals(parent) || Document.MIME_TYPE_DIR.equals(mime) || name == null || name.length() > 240
                 || name.isEmpty() || name.contains("/") || name.contains("\\") || name.matches("(?s).*[\\x00-\\x1f].*"))
             throw new FileNotFoundException("Choose the Navi Authenticator folder itself");
         long identity = Binder.clearCallingIdentity();
         try {
-            if (name.matches("navi-auth-(request|receipt|cancel)-[a-f0-9]{32}\\.json")) {
+            if (name.matches("navi-auth-(request|receipt|cancel|enroll-offer)-[a-f0-9]{32}\\.json")) {
                 File[] files = inbox.listFiles();
                 int retained = 0;
                 if (files != null) for (File file : files) {
@@ -126,6 +132,10 @@ public final class AuthDocumentsProvider extends DocumentsProvider {
         if (id.matches("response:[a-f0-9]{32}")) {
             if (!"r".equals(mode)) throw new FileNotFoundException("Approval is read-only");
             return responsePipe(response(id)); // Snapshot bytes; a replaced mailbox cannot change an open response.
+        }
+        if (id.matches("hello:[a-f0-9]{32}")) {
+            if (!"r".equals(mode)) throw new FileNotFoundException("Pairing confirmation is read-only");
+            return responsePipe(hello(id));
         }
         File file = incoming(id);
         if ("r".equals(mode)) return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
@@ -215,6 +225,9 @@ public final class AuthDocumentsProvider extends DocumentsProvider {
             } else if (id.matches("response:[a-f0-9]{32}")) {
                 byte[] bytes = response(id);
                 name = "navi-auth-response-" + id.substring(9) + ".json"; mime = "application/json"; size = bytes.length; flags = 0;
+            } else if (id.matches("hello:[a-f0-9]{32}")) {
+                byte[] bytes = hello(id);
+                name = "navi-auth-enroll-hello-" + id.substring(6) + ".json"; mime = "application/json"; size = bytes.length; flags = 0;
             } else {
                 File file = incoming(id);
                 name = new String(Files.readAllBytes(new File(inbox, file.getName() + ".name").toPath()), StandardCharsets.UTF_8);
@@ -249,6 +262,11 @@ public final class AuthDocumentsProvider extends DocumentsProvider {
                 throw new FileNotFoundException("Approval is no longer available");
             return value.toString().getBytes(StandardCharsets.UTF_8);
         } catch (Exception error) { throw missing(error); }
+    }
+
+    private byte[] hello(String id) throws FileNotFoundException {
+        try { return PairingCode.helloBytes(new Bridge(getContext()), id.substring(6)); }
+        catch (Exception error) { throw missing(error); }
     }
 
     private Uri downloadUri(String id) throws FileNotFoundException {

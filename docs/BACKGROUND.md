@@ -7,9 +7,9 @@ and development/install access.
 
 ## One-time setup
 
-1. Open Navi Authenticator after enrollment. Tap **Enable network authentication**
+1. Open Navi Authenticator after enrollment, then **☰ → Settings**. Tap **Enable network authentication**
    and approve the one-time biometric binding of its separate TLS transport key.
-2. Open **Stay available → Background setup & instructions**.
+2. In the same **Stay available** section open **Background setup & instructions**.
 3. Allow notifications. Keep **Computer connection** and **Authentication requests**
    channels enabled. The connection channel can be silent. Set requests to alerting
    and allow pop-on-screen behavior if desired.
@@ -60,7 +60,8 @@ reliability or measured battery cost.
 
 ## Stationary fingerprint reader
 
-Android 0.8.3 adds **Desk reader mode**, off by default. Enable it and leave Navi
+Android 0.8.3 adds **Desk reader mode**, off by default (**☰ → Settings** since
+0.9.2). Enable it and leave Navi
 open and unlocked to automatically start fingerprint prompts for verified requests
 from paired computers. This is useful for rear-sensor phones lying face down.
 The app keeps its visible screen awake; leaving the app restores normal screen
